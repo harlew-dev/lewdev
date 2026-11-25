@@ -41,6 +41,7 @@ describe("page stack", () => {
     expect(pageSandbox({ kind: "new-sandbox" })).toBeNull();
     expect(pageSandbox({ kind: "sandbox", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "ssh-terminal", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
   });
 
   test("inserts the sandbox page below a sub-page opened from the list", () => {
@@ -72,13 +73,22 @@ describe("breadcrumbs", () => {
     expect(breadcrumbTrail(stackOf({ kind: "new-sandbox" }))).toEqual(["Sandboxes", "New sandbox"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "ssh-details", ...myBox })),
-    ).toEqual(["Sandboxes", "my-box", "SSH details"]);
+    ).toEqual(["Sandboxes", "my-box", "Settings"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "delete-sandbox", ...myBox })),
     ).toEqual(["Sandboxes", "my-box", "Delete sandbox"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "ssh-terminal", ...myBox })),
     ).toEqual(["Sandboxes", "my-box", "SSH terminal"]);
+    expect(
+      breadcrumbTrail(
+        stackOf(
+          { kind: "sandbox", ...myBox },
+          { kind: "ssh-details", ...myBox },
+          { kind: "forget-host", ...myBox },
+        ),
+      ),
+    ).toEqual(["Sandboxes", "my-box", "Settings", "Forget host key"]);
   });
 });
 

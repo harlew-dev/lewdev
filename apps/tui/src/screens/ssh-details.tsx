@@ -13,6 +13,7 @@ interface SshDetailsScreenProps {
   gatewayHost: string | null;
   keyPath: string | null;
   keyAvailable: boolean;
+  knownHostsPath: string;
   actions: PageAction[];
   selectedIndex: number;
 }
@@ -33,6 +34,7 @@ export function SshDetailsScreen({
   gatewayHost,
   keyPath,
   keyAvailable,
+  knownHostsPath,
   actions,
   selectedIndex,
 }: SshDetailsScreenProps) {
@@ -54,7 +56,7 @@ export function SshDetailsScreen({
           borderStyle="rounded"
           borderColor={colors.border}
           backgroundColor={colors.panel}
-          title="SSH details"
+          title="SSH"
           titleColor={colors.accent}
           paddingLeft={2}
           paddingRight={2}
@@ -89,6 +91,11 @@ export function SshDetailsScreen({
                 lewdev created.
               </text>
             )}
+          </InfoRow>
+          <InfoRow label="Known hosts">
+            <text fg={colors.text} selectable wrapMode="word">
+              {knownHostsPath}
+            </text>
           </InfoRow>
           {details.sshPublicKey ? (
             <InfoRow label="Public key">

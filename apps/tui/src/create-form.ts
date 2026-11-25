@@ -11,7 +11,8 @@ export type CreateFocus =
   | "size-cpu"
   | "size-memory"
   | "size-disk"
-  | "name";
+  | "name"
+  | "submit";
 
 export interface CreateFormValues {
   imageSource: ImageSource;
@@ -44,13 +45,14 @@ export interface SizePreset {
   label: string;
   cpu: number;
   memoryMB: number;
+  diskGB: number;
 }
 
 export const SIZE_PRESETS: SizePreset[] = [
-  { id: "small", label: "small", cpu: 2, memoryMB: 4096 },
-  { id: "default", label: "default", cpu: 4, memoryMB: 8192 },
-  { id: "large", label: "large", cpu: 8, memoryMB: 16384 },
-  { id: "xlarge", label: "xlarge", cpu: 16, memoryMB: 32768 },
+  { id: "small", label: "small", cpu: 2, memoryMB: 4096, diskGB: 20 },
+  { id: "default", label: "default", cpu: 4, memoryMB: 8192, diskGB: 40 },
+  { id: "large", label: "large", cpu: 8, memoryMB: 16384, diskGB: 80 },
+  { id: "xlarge", label: "xlarge", cpu: 16, memoryMB: 32768, diskGB: 160 },
 ];
 
 export const SIZE_CHOICES: Array<{ id: SizeId; label: string }> = [
@@ -101,7 +103,7 @@ export function moveSize(id: SizeId, delta: number): SizeId {
 export function createSizeSummary(values: CreateFormValues): string {
   const preset = sizePreset(values.size);
   if (preset) {
-    return `${preset.cpu} vCPU · ${preset.memoryMB / 1024} GB memory · disk: server default`;
+    return `${preset.cpu} vCPU · ${preset.memoryMB / 1024} GB memory · ${preset.diskGB} GB disk`;
   }
   const cpu = values.customCpu.trim() || "—";
   const memory = values.customMemoryGB.trim() || "—";
@@ -120,7 +122,7 @@ export function createFocusOrder(values: CreateFormValues): CreateFocus[] {
   if (values.size === "custom") {
     order.push("size-cpu", "size-memory", "size-disk");
   }
-  order.push("name");
+  order.push("name", "submit");
   return order;
 }
 
@@ -233,7 +235,7 @@ export interface CreateSizeInput {
 export function createSizeInput(values: CreateFormValues): CreateSizeInput {
   const preset = sizePreset(values.size);
   if (preset) {
-    return { cpu: preset.cpu, memoryMB: preset.memoryMB };
+    return { cpu: preset.cpu, memoryMB: preset.memoryMB, diskGB: preset.diskGB };
   }
 
   const cpu = parseOptionalPositive(values.customCpu, "CPU", false);

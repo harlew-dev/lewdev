@@ -25,11 +25,13 @@ function values(overrides: Partial<CreateFormValues> = {}): CreateFormValues {
 
 describe("size choices", () => {
   test("defines the four presets and custom", () => {
-    expect(SIZE_PRESETS.map((preset) => [preset.id, preset.cpu, preset.memoryMB])).toEqual([
-      ["small", 2, 4096],
-      ["default", 4, 8192],
-      ["large", 8, 16384],
-      ["xlarge", 16, 32768],
+    expect(
+      SIZE_PRESETS.map((preset) => [preset.id, preset.cpu, preset.memoryMB, preset.diskGB]),
+    ).toEqual([
+      ["small", 2, 4096, 20],
+      ["default", 4, 8192, 40],
+      ["large", 8, 16384, 80],
+      ["xlarge", 16, 32768, 160],
     ]);
     expect(CREATE_DEFAULT.size).toBe("default");
   });
@@ -42,9 +44,9 @@ describe("size choices", () => {
   });
 
   test("summarizes presets and custom sizes", () => {
-    expect(createSizeSummary(values())).toBe("4 vCPU · 8 GB memory · disk: server default");
+    expect(createSizeSummary(values())).toBe("4 vCPU · 8 GB memory · 40 GB disk");
     expect(createSizeSummary(values({ size: "xlarge" }))).toBe(
-      "16 vCPU · 32 GB memory · disk: server default",
+      "16 vCPU · 32 GB memory · 160 GB disk",
     );
     expect(
       createSizeSummary(
@@ -57,7 +59,7 @@ describe("size choices", () => {
   });
 
   test("turns presets and custom values into create options", () => {
-    expect(createSizeInput(values())).toEqual({ cpu: 4, memoryMB: 8192 });
+    expect(createSizeInput(values())).toEqual({ cpu: 4, memoryMB: 8192, diskGB: 40 });
     expect(
       createSizeInput(
         values({ size: "custom", customCpu: "0.5", customMemoryGB: "0.5", customDiskGB: "20" }),
@@ -87,7 +89,7 @@ describe("size choices", () => {
 
 describe("focus order", () => {
   test("visits image, size and name for presets", () => {
-    expect(createFocusOrder(values())).toEqual(["image", "size", "name"]);
+    expect(createFocusOrder(values())).toEqual(["image", "size", "name", "submit"]);
   });
 
   test("adds the image sub-field when a custom image or Dockerfile is picked", () => {
@@ -96,12 +98,14 @@ describe("focus order", () => {
       "image-ref",
       "size",
       "name",
+      "submit",
     ]);
     expect(createFocusOrder(values({ imageSource: "dockerfile" }))).toEqual([
       "image",
       "image-dockerfile",
       "size",
       "name",
+      "submit",
     ]);
     expect(nextCreateFocus(values({ imageSource: "custom" }), "image", 1)).toBe("image-ref");
     expect(nextCreateFocus(values({ imageSource: "dockerfile" }), "image-dockerfile", 1)).toBe(
@@ -118,10 +122,12 @@ describe("focus order", () => {
       "size-memory",
       "size-disk",
       "name",
+      "submit",
     ]);
     expect(nextCreateFocus(custom, "size", 1)).toBe("size-cpu");
-    expect(nextCreateFocus(custom, "name", 1)).toBe("image");
-    expect(nextCreateFocus(custom, "image", -1)).toBe("name");
+    expect(nextCreateFocus(custom, "name", 1)).toBe("submit");
+    expect(nextCreateFocus(custom, "submit", 1)).toBe("image");
+    expect(nextCreateFocus(custom, "image", -1)).toBe("submit");
   });
 });
 

@@ -6,6 +6,7 @@ import {
   actionKey,
   buildConnectActions,
   buildDeleteActions,
+  buildForgetHostActions,
   buildNewSandboxActions,
   buildOpenPortActions,
   buildPortsPageActions,
@@ -43,6 +44,7 @@ describe("sandbox page actions", () => {
       "back",
     ]);
     expect(actions.find((entry) => entry.id === "ssh")?.label).toBe("Open terminal");
+    expect(actions.find((entry) => entry.id === "ssh-info")?.label).toBe("Settings");
     expect(actions.find((entry) => entry.id === "delete")?.tone).toBe("error");
     expect(shortcuts(actions)).toEqual({
       start: undefined,
@@ -181,14 +183,18 @@ describe("sandbox list actions", () => {
 
 describe("other page actions", () => {
   test("ports page closes the selected port with x", () => {
-    const withPort = buildPortsPageActions({ hasSelectedPort: true });
-    const withoutPort = buildPortsPageActions({ hasSelectedPort: false });
+    const withPort = buildPortsPageActions({ hasPorts: true, hasSelectedPort: true });
+    const buttonSelected = buildPortsPageActions({ hasPorts: true, hasSelectedPort: false });
+    const withoutPort = buildPortsPageActions({ hasPorts: false, hasSelectedPort: false });
 
     expect(withPort.map((entry) => entry.id)).toEqual(["open-port", "close-port", "back"]);
     expect(withPort.find((entry) => entry.id === "open-port")?.key).toBe("o");
     expect(withPort.find((entry) => entry.id === "close-port")?.key).toBe("x");
     expect(withPort.find((entry) => entry.id === "back")?.key).toBe("esc");
     expect(withPort.find((entry) => entry.id === "quit")).toBeUndefined();
+    expect(buttonSelected.find((entry) => entry.id === "close-port")?.unavailableReason).toBe(
+      "Select a port first.",
+    );
     expect(withoutPort.find((entry) => entry.id === "close-port")?.unavailableReason).toBe(
       "There are no open ports to close.",
     );
@@ -221,12 +227,28 @@ describe("other page actions", () => {
     }
   });
 
-  test("ssh details lists copy and back without letter shortcuts", () => {
-    const actions = buildSshDetailsActions();
-    expect(actions.map((entry) => entry.id)).toEqual(["copy-ssh", "back"]);
+  test("settings lists copy, forget and back without letter shortcuts", () => {
+    const actions = buildSshDetailsActions({ canForgetHost: true });
+    expect(actions.map((entry) => entry.id)).toEqual(["copy-ssh", "forget-host", "back"]);
     expect(actions.find((entry) => entry.id === "copy-ssh")?.key).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "forget-host")?.key).toBeUndefined();
     expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
     expect(actions.find((entry) => entry.id === "quit")).toBeUndefined();
+  });
+
+  test("disables forgetting the host key without a gateway host", () => {
+    const actions = buildSshDetailsActions({ canForgetHost: false });
+    expect(actions.find((entry) => entry.id === "forget-host")?.unavailableReason).toBe(
+      "The SSH host could not be derived from the configured API URL.",
+    );
+  });
+
+  test("forget confirmation offers forget and cancel", () => {
+    const actions = buildForgetHostActions();
+    expect(actions.map((entry) => entry.id)).toEqual(["confirm-forget", "back"]);
+    expect(actions.find((entry) => entry.id === "confirm-forget")?.tone).toBe("error");
+    expect(actions.find((entry) => entry.id === "back")?.label).toBe("Cancel");
+    expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
   });
 });
 

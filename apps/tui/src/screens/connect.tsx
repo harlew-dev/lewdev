@@ -1,4 +1,7 @@
-import { Field, Panel } from "../components";
+import type { ScrollBoxRenderable } from "@opentui/core";
+import { useEffect, useRef } from "react";
+
+import { Field, FormButton, Panel } from "../components";
 import { colors } from "../theme";
 
 export interface ConnectFormState {
@@ -6,33 +9,45 @@ export interface ConnectFormState {
   token: string;
 }
 
+export type ConnectField = "url" | "token" | "submit";
+
 interface ConnectScreenProps {
   form: ConnectFormState;
-  activeField: "url" | "token";
+  activeField: ConnectField;
   busy: boolean;
   error: string | null;
   configPath: string;
 }
 
 export function ConnectScreen({ form, activeField, busy, error, configPath }: ConnectScreenProps) {
+  const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+
+  useEffect(() => {
+    scrollRef.current?.scrollChildIntoView(`connect-${activeField}`, { align: "nearest" });
+  }, [activeField]);
+
   return (
-    <scrollbox flexGrow={1} flexShrink={1} width="100%" scrollY>
+    <scrollbox ref={scrollRef} flexGrow={1} flexShrink={1} width="100%" scrollY>
       <Panel title="Connect to AerolVM" width={74}>
         <text fg={colors.text}>Point lewdev at your AerolVM server and paste an API token.</text>
         <box flexDirection="column" gap={1}>
-          <Field
-            label="API URL"
-            value={form.url}
-            active={activeField === "url"}
-            placeholder="http://127.0.0.1:8080"
-          />
-          <Field
-            label="API token"
-            value={form.token}
-            active={activeField === "token"}
-            masked
-            placeholder="avm_…"
-          />
+          <box id="connect-url">
+            <Field
+              label="API URL"
+              value={form.url}
+              active={activeField === "url"}
+              placeholder="http://127.0.0.1:8080"
+            />
+          </box>
+          <box id="connect-token">
+            <Field
+              label="API token"
+              value={form.token}
+              active={activeField === "token"}
+              masked
+              placeholder="avm_…"
+            />
+          </box>
         </box>
         <text fg={colors.muted} wrapMode="word">
           The token is hidden while you type. Ctrl+V pastes from the system clipboard. lewdev checks
@@ -47,6 +62,9 @@ export function ConnectScreen({ form, activeField, busy, error, configPath }: Co
         <text fg={colors.muted} wrapMode="word">
           Config file: {configPath} (0600)
         </text>
+        <box id="connect-submit">
+          <FormButton label="Save" active={activeField === "submit"} />
+        </box>
       </Panel>
     </scrollbox>
   );

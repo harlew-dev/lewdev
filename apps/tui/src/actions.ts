@@ -14,6 +14,8 @@ export type ActionId =
   | "open-port"
   | "close-port"
   | "copy-ssh"
+  | "forget-host"
+  | "confirm-forget"
   | "confirm-delete"
   | "submit"
   | "paste"
@@ -213,10 +215,10 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
     ),
     action(
       "ssh-info",
-      "View SSH details",
-      "ssh info",
+      "Settings",
+      "settings",
       undefined,
-      "Show the gateway host, port, login user, key path, and command.",
+      "Show the SSH host, key path, known hosts file, and saved host key.",
       undefined,
     ),
     action(
@@ -264,8 +266,8 @@ export function buildSandboxPageGroups(
   ];
 }
 
-/** Actions on the SSH details page. */
-export function buildSshDetailsActions(): PageAction[] {
+/** Actions on the SSH settings page. */
+export function buildSshDetailsActions(context: { canForgetHost: boolean }): PageAction[] {
   return [
     action(
       "copy-ssh",
@@ -275,12 +277,42 @@ export function buildSshDetailsActions(): PageAction[] {
       "Copy the full ssh command to the system clipboard.",
       undefined,
     ),
+    action(
+      "forget-host",
+      "Forget saved host key",
+      "forget host key",
+      undefined,
+      "Remove the saved gateway key so the next connection asks to trust it again.",
+      context.canForgetHost
+        ? undefined
+        : "The SSH host could not be derived from the configured API URL.",
+      "error",
+    ),
     action("back", "Back", "back", "esc", "Return to the previous page.", undefined),
   ];
 }
 
+/** Actions on the forget-host-key confirmation page. */
+export function buildForgetHostActions(): PageAction[] {
+  return [
+    action(
+      "confirm-forget",
+      "Forget host key",
+      "forget",
+      undefined,
+      "Remove the saved gateway key from lewdev's known_hosts.",
+      undefined,
+      "error",
+    ),
+    action("back", "Cancel", "cancel", "esc", "Keep the saved host key.", undefined),
+  ];
+}
+
 /** Actions on the Ports page; x acts on the selected port. */
-export function buildPortsPageActions(context: { hasSelectedPort: boolean }): PageAction[] {
+export function buildPortsPageActions(context: {
+  hasPorts: boolean;
+  hasSelectedPort: boolean;
+}): PageAction[] {
   return [
     action(
       "open-port",
@@ -296,7 +328,11 @@ export function buildPortsPageActions(context: { hasSelectedPort: boolean }): Pa
       "close port",
       "x",
       "Stop exposing the selected port.",
-      context.hasSelectedPort ? undefined : "There are no open ports to close.",
+      context.hasSelectedPort
+        ? undefined
+        : context.hasPorts
+          ? "Select a port first."
+          : "There are no open ports to close.",
     ),
     action("back", "Back", "back", "esc", "Return to the sandbox page.", undefined),
   ];

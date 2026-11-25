@@ -12,6 +12,7 @@ export type Page =
   | ({ kind: "ports" } & SandboxPageTarget)
   | ({ kind: "open-port" } & SandboxPageTarget)
   | ({ kind: "delete-sandbox" } & SandboxPageTarget)
+  | ({ kind: "forget-host" } & SandboxPageTarget)
   | ({ kind: "ssh-terminal" } & SandboxPageTarget);
 
 export const ROOT_PAGE: Page = { kind: "sandboxes" };
@@ -21,10 +22,11 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   connect: "Connect",
   "new-sandbox": "New sandbox",
   sandbox: null,
-  "ssh-details": "SSH details",
+  "ssh-details": "Settings",
   ports: "Ports",
   "open-port": "Open port",
   "delete-sandbox": "Delete sandbox",
+  "forget-host": "Forget host key",
   "ssh-terminal": "SSH terminal",
 };
 

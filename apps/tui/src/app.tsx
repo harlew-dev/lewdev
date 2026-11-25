@@ -3,9 +3,13 @@ import {
   type CreateSandboxInput,
   deletePrivateKey,
   describeError,
+  ensureKnownHostsFile,
+  forgetHostKey,
   formatSshCommand,
   getConfigPath,
   getKeyPath,
+  getKnownHostsPath,
+  knownHostsEntry,
   LewdevApi,
   type LewdevConfig,
   loadConfig,
@@ -15,6 +19,7 @@ import {
   type SandboxInfo,
   saveConfig,
   savePrivateKey,
+  SSH_PORT,
   sshHostFromApiUrl,
 } from "@lewdev/core";
 import type { KeyEvent } from "@opentui/core";
@@ -37,6 +42,7 @@ import {
   buildSandboxListActions,
   buildSandboxPageActions,
   buildSandboxPageGroups,
+  buildForgetHostActions,
   buildSshDetailsActions,
   findActionForKey,
   nextActionId,
@@ -57,7 +63,7 @@ import {
   ROOT_PAGE,
   type SandboxPageTarget,
 } from "./navigation";
-import { type ConnectFormState, ConnectScreen } from "./screens/connect";
+import { type ConnectField, type ConnectFormState, ConnectScreen } from "./screens/connect";
 import {
   CREATE_DEFAULT,
   type CreateFocus,
@@ -73,8 +79,10 @@ import {
 import { CreateScreen } from "./screens/create";
 import { DeleteSandboxScreen } from "./screens/delete-sandbox";
 import { DetailsScreen } from "./screens/details";
+import { ForgetHostScreen } from "./screens/forget-host";
 import { ListScreen } from "./screens/list";
 import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
+import { PORT_VISIBILITY_OPTIONS } from "./port-options";
 import { PortsScreen } from "./screens/ports";
 import { SshDetailsScreen } from "./screens/ssh-details";
 import {
@@ -84,9 +92,21 @@ import {
 } from "./screens/ssh-terminal";
 import { colors } from "./theme";
 
-type ConnectField = "url" | "token";
-
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
+
+const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "submit"];
+const PORT_FIELDS: [PortFormValues["field"], ...PortFormValues["field"][]] = [
+  "port",
+  "visibility",
+  "submit",
+];
+
+function nextField<T>(fields: [T, ...T[]], current: T, delta: number): T {
+  const index = fields.indexOf(current);
+  const base = Math.max(index, 0);
+  const next = (base + delta + fields.length) % fields.length;
+  return fields[next] ?? fields[0];
+}
 
 const NO_KEY_REASON =
   "No private key is stored for this sandbox. The key is only available for sandboxes created by lewdev.";
@@ -180,6 +200,8 @@ export function App() {
   const [portSelected, setPortSelected] = useState(0);
   const [portForm, setPortForm] = useState<PortFormValues | null>(null);
   const [portFormError, setPortFormError] = useState<string | null>(null);
+  const [visibilityMenuOpen, setVisibilityMenuOpen] = useState(false);
+  const [visibilityMenuIndex, setVisibilityMenuIndex] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
 
@@ -354,7 +376,7 @@ export function App() {
 
   useEffect(() => {
     const count = pageDetails?.exposedPorts.length ?? 0;
-    setPortSelected((previous) => (count === 0 ? 0 : Math.min(previous, count - 1)));
+    setPortSelected((previous) => Math.min(previous, count));
   }, [pageDetails]);
 
   useEffect(() => {
@@ -393,6 +415,7 @@ export function App() {
         sandboxId: pageDetails.id,
         host: sshHostFromApiUrl(config.apiUrl),
         keyPath: getKeyPath(pageDetails.id),
+        knownHostsPath: getKnownHostsPath(),
       });
     } catch {
       return null;
@@ -421,6 +444,25 @@ export function App() {
     }
   }, [pageDetails]);
 
+  const knownHostsPath = useMemo(() => {
+    try {
+      return getKnownHostsPath();
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const forgetEntry = useMemo(() => {
+    if (!gatewayHost) {
+      return null;
+    }
+    try {
+      return knownHostsEntry(gatewayHost);
+    } catch {
+      return null;
+    }
+  }, [gatewayHost]);
+
   const sshArgv = useMemo(() => {
     if (page.kind !== "ssh-terminal" || !config) {
       return null;
@@ -430,6 +472,7 @@ export function App() {
         sandboxId: page.id,
         host: sshHostFromApiUrl(config.apiUrl),
         keyPath: getKeyPath(page.id),
+        knownHostsPath: getKnownHostsPath(),
       });
     } catch {
       return null;
@@ -448,11 +491,16 @@ export function App() {
       case "sandbox":
         return buildSandboxPageActions(ctx);
       case "ssh-details":
-        return buildSshDetailsActions();
-      case "ports":
+        return buildSshDetailsActions({ canForgetHost: gatewayHost !== null });
+      case "forget-host":
+        return buildForgetHostActions();
+      case "ports": {
+        const count = pageDetails?.exposedPorts.length ?? 0;
         return buildPortsPageActions({
-          hasSelectedPort: (pageDetails?.exposedPorts.length ?? 0) > 0,
+          hasPorts: count > 0,
+          hasSelectedPort: portSelected < count,
         });
+      }
       case "open-port":
         return buildOpenPortActions();
       case "delete-sandbox":
@@ -464,7 +512,7 @@ export function App() {
       case "ssh-terminal":
         return [];
     }
-  }, [page, pageDetails, keyAvailable, gatewayHost, config]);
+  }, [page, pageDetails, keyAvailable, gatewayHost, config, portSelected]);
 
   const selectedActionIndex = actionIndex(actions, selectedActionId);
   const sandboxGroups = useMemo(
@@ -537,6 +585,17 @@ export function App() {
         }
         return;
       }
+      case "forget-host": {
+        const target = actionTarget();
+        if (target) {
+          push({ kind: "forget-host", ...target });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-forget":
+        void performForgetHost();
+        return;
       case "new":
         openCreate();
         return;
@@ -548,6 +607,8 @@ export function App() {
         if (target) {
           setPortForm({ field: "port", port: "", visibility: "public" });
           setPortFormError(null);
+          setVisibilityMenuOpen(false);
+          setVisibilityMenuIndex(0);
           pushSandboxScoped({ kind: "open-port", ...target });
         }
         return;
@@ -642,10 +703,12 @@ export function App() {
         showToast("error", NO_KEY_REASON);
         return;
       }
+      await ensureKnownHostsFile();
       buildSshArgv({
         sandboxId: target.id,
         host: sshHostFromApiUrl(config.apiUrl),
         keyPath: getKeyPath(target.id),
+        knownHostsPath: getKnownHostsPath(),
       });
       pushSandboxScoped({ kind: "ssh-terminal", ...target });
     } catch (error) {
@@ -738,24 +801,33 @@ export function App() {
     setImageMenuOpen(false);
   }
 
+  function openVisibilityMenu(): void {
+    const index = PORT_VISIBILITY_OPTIONS.findIndex(
+      (option) => option.value === portForm?.visibility,
+    );
+    setVisibilityMenuIndex(Math.max(index, 0));
+    setVisibilityMenuOpen(true);
+  }
+
+  function chooseVisibility(index: number): void {
+    const option = PORT_VISIBILITY_OPTIONS[index];
+    if (!option) {
+      return;
+    }
+    setPortForm((previous) => (previous ? { ...previous, visibility: option.value } : previous));
+    setVisibilityMenuOpen(false);
+  }
+
   function submitCurrentForm(): void {
     switch (page.kind) {
       case "connect":
-        if (connectField === "url") {
-          setConnectField("token");
-        } else {
-          void submitConnect();
-        }
+        void submitConnect();
         return;
       case "new-sandbox":
         void submitCreate();
         return;
       case "open-port":
-        if (portForm?.field === "port") {
-          setPortForm((previous) => (previous ? { ...previous, field: "visibility" } : previous));
-        } else {
-          void submitPort();
-        }
+        void submitPort();
         return;
       default:
         return;
@@ -942,6 +1014,42 @@ export function App() {
     }
   }
 
+  async function performForgetHost(): Promise<void> {
+    const target = page.kind === "forget-host" ? pageSandbox(page) : null;
+    const host = gatewayHost;
+    if (!target || !host) {
+      return;
+    }
+
+    let entry: string;
+    try {
+      entry = knownHostsEntry(host);
+    } catch {
+      entry = `${host}:${SSH_PORT}`;
+    }
+
+    let removed = false;
+    let failure: string | null = null;
+    setBusyMessage(`Forgetting the saved host key for ${entry}…`);
+    try {
+      removed = await forgetHostKey(host);
+    } catch (error) {
+      failure = describeError(error);
+    } finally {
+      setBusyMessage(null);
+    }
+
+    setSelectedActionId(null);
+    setStack((previous) => popPage(previous));
+    if (failure) {
+      showToast("error", failure);
+    } else if (removed) {
+      showToast("success", `Forgot the saved host key for ${entry}.`);
+    } else {
+      showToast("info", `No saved host key for ${entry}.`);
+    }
+  }
+
   async function submitPort(): Promise<void> {
     if (!api || page.kind !== "open-port" || busyMessage) {
       return;
@@ -1016,6 +1124,9 @@ export function App() {
     }
 
     if (page.kind === "connect") {
+      if (connectField === "submit") {
+        return;
+      }
       setConnectForm((previous) => ({
         ...previous,
         [connectField]: appendText(previous[connectField], text),
@@ -1070,6 +1181,8 @@ export function App() {
             name: appendText(previous.name, text),
           }));
           return;
+        case "submit":
+          return;
       }
     }
     if (page.kind === "open-port" && portForm?.field === "port") {
@@ -1121,16 +1234,25 @@ export function App() {
     if (page.kind === "ports") {
       const count = pageDetails?.exposedPorts.length ?? 0;
       if (key.name === "down" || actionKey(key) === "j") {
-        setPortSelected((previous) => Math.min(previous + 1, Math.max(0, count - 1)));
+        setPortSelected((previous) => Math.min(previous + 1, count));
         return;
       }
       if (key.name === "up" || actionKey(key) === "k") {
         setPortSelected((previous) => Math.max(0, previous - 1));
         return;
       }
+      if (key.name === "return" && portSelected >= count) {
+        runAction("open-port");
+        return;
+      }
     }
 
-    if (page.kind === "sandbox" || page.kind === "ssh-details" || page.kind === "delete-sandbox") {
+    if (
+      page.kind === "sandbox" ||
+      page.kind === "ssh-details" ||
+      page.kind === "delete-sandbox" ||
+      page.kind === "forget-host"
+    ) {
       if (key.name === "down" || actionKey(key) === "j") {
         moveAction(1);
         return;
@@ -1179,21 +1301,73 @@ export function App() {
       }
     }
 
+    if (page.kind === "open-port") {
+      if (visibilityMenuOpen) {
+        if (key.name === "down" || actionKey(key) === "j") {
+          setVisibilityMenuIndex((index) =>
+            Math.min(index + 1, PORT_VISIBILITY_OPTIONS.length - 1),
+          );
+          return;
+        }
+        if (key.name === "up" || actionKey(key) === "k") {
+          setVisibilityMenuIndex((index) => Math.max(0, index - 1));
+          return;
+        }
+        if (key.name === "return" || key.name === "space") {
+          chooseVisibility(visibilityMenuIndex);
+          return;
+        }
+        if (key.name === "escape") {
+          setVisibilityMenuOpen(false);
+          return;
+        }
+        return;
+      }
+      if (portForm?.field === "visibility" && (key.name === "return" || key.name === "space")) {
+        openVisibilityMenu();
+        return;
+      }
+    }
+
+    if (key.name === "return") {
+      if (page.kind === "connect" && connectField !== "submit") {
+        setConnectField((previous) => nextField(CONNECT_FIELDS, previous, 1));
+        return;
+      }
+      if (page.kind === "new-sandbox" && createFocus !== "submit") {
+        if (createFocus === "size") {
+          return;
+        }
+        setCreateFocus((current) => nextCreateFocus(createValues, current, 1));
+        return;
+      }
+      if (page.kind === "open-port" && portForm && portForm.field !== "submit") {
+        if (portForm.field === "port") {
+          setPortForm((previous) => (previous ? { ...previous, field: "visibility" } : previous));
+        }
+        return;
+      }
+    }
+
     if (runKeyAction(key)) {
       return;
     }
 
     if (page.kind === "connect") {
-      if (key.name === "tab") {
-        setConnectField((previous) => (previous === "url" ? "token" : "url"));
+      if (key.name === "tab" || key.name === "backtab" || (key.name === "tab" && key.shift)) {
+        const delta = key.name === "backtab" || key.shift ? -1 : 1;
+        setConnectField((previous) => nextField(CONNECT_FIELDS, previous, delta));
         return;
       }
       if (key.name === "down") {
-        setConnectField("token");
+        setConnectField((previous) => nextField(CONNECT_FIELDS, previous, 1));
         return;
       }
       if (key.name === "up") {
-        setConnectField("url");
+        setConnectField((previous) => nextField(CONNECT_FIELDS, previous, -1));
+        return;
+      }
+      if (connectField === "submit") {
         return;
       }
       if (key.name === "backspace" || key.name === "delete") {
@@ -1321,26 +1495,28 @@ export function App() {
     }
 
     if (page.kind === "open-port") {
-      if (key.name === "tab" || key.name === "down" || key.name === "up") {
+      if (key.name === "tab" || key.name === "backtab" || (key.name === "tab" && key.shift)) {
+        const delta = key.name === "backtab" || key.shift ? -1 : 1;
         setPortForm((previous) =>
           previous
-            ? { ...previous, field: previous.field === "port" ? "visibility" : "port" }
+            ? { ...previous, field: nextField(PORT_FIELDS, previous.field, delta) }
             : previous,
         );
         return;
       }
-      if (
-        portForm?.field === "visibility" &&
-        (key.name === "left" || key.name === "right" || key.name === "space")
-      ) {
+      if (key.name === "down" || key.name === "up") {
+        const delta = key.name === "down" ? 1 : -1;
         setPortForm((previous) =>
           previous
-            ? {
-                ...previous,
-                visibility: previous.visibility === "public" ? "token" : "public",
-              }
+            ? { ...previous, field: nextField(PORT_FIELDS, previous.field, delta) }
             : previous,
         );
+        return;
+      }
+      if (portForm?.field === "submit") {
+        return;
+      }
+      if (portForm?.field !== "port") {
         return;
       }
       if (key.name === "backspace" || key.name === "delete") {
@@ -1388,7 +1564,18 @@ export function App() {
       return actionHints(actions, { extra: [["↑/↓", "move"]] });
     }
     if (page.kind === "connect") {
-      return actionHints(actions, { extra: [["tab", "next field"]] });
+      if (connectField === "submit") {
+        return actionHints(actions, { extra: [["tab", "next field"]] });
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        {
+          extra: [
+            ["tab", "next field"],
+            ["enter", "next field"],
+          ],
+        },
+      );
     }
     if (page.kind === "new-sandbox") {
       if (imageMenuOpen) {
@@ -1398,30 +1585,60 @@ export function App() {
           ["esc", "close"],
         ];
       }
+      if (createFocus === "submit") {
+        return actionHints(actions, { extra: [["tab", "next field"]] });
+      }
       const extra: ActionHint[] = [["tab", "next field"]];
       if (createFocus === "image") {
         extra.push(["enter", "open list"], ["space", "open list"]);
-      }
-      if (createFocus === "size") {
+      } else if (createFocus === "size") {
         extra.push(["←/→", "preset"]);
+      } else {
+        extra.push(["enter", "next field"]);
       }
-      const visibleActions =
-        createFocus === "image" ? actions.filter((action) => action.id !== "submit") : actions;
-      return actionHints(visibleActions, { extra });
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
     }
     if (page.kind === "open-port") {
-      return actionHints(actions, {
-        extra: [
-          ["tab", "next field"],
-          ["←/→", "visibility"],
-        ],
-      });
+      if (visibilityMenuOpen) {
+        return [
+          ["↑/↓", "move"],
+          ["enter", "pick"],
+          ["esc", "close"],
+        ];
+      }
+      if (portForm?.field === "submit") {
+        return actionHints(actions, { extra: [["tab", "next field"]] });
+      }
+      const focusVisibility = portForm?.field === "visibility";
+      const extra: ActionHint[] = [["tab", "next field"]];
+      if (focusVisibility) {
+        extra.push(["enter", "open list"], ["space", "open list"]);
+      } else {
+        extra.push(["enter", "next field"]);
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
     }
     return actionHints(actions, {
       selection:
         page.kind === "sandbox" || page.kind === "ssh-details" || page.kind === "delete-sandbox",
     });
-  }, [booting, page.kind, actions, terminalStatus, imageMenuOpen, createFocus]);
+  }, [
+    booting,
+    page.kind,
+    actions,
+    terminalStatus,
+    imageMenuOpen,
+    createFocus,
+    visibilityMenuOpen,
+    portForm?.field,
+    connectField,
+  ]);
 
   if (booting) {
     return (
@@ -1480,6 +1697,7 @@ export function App() {
           gatewayHost={gatewayHost}
           keyPath={detailsKeyPath}
           keyAvailable={keyAvailable}
+          knownHostsPath={knownHostsPath ?? "unavailable"}
           actions={actions}
           selectedIndex={selectedActionIndex}
         />
@@ -1506,6 +1724,8 @@ export function App() {
       content = (
         <OpenPortScreen
           form={portForm ?? { field: "port", port: "", visibility: "public" }}
+          visibilityMenuOpen={visibilityMenuOpen}
+          visibilityMenuIndex={visibilityMenuIndex}
           error={portFormError}
         />
       );
@@ -1520,10 +1740,20 @@ export function App() {
         />
       );
       break;
+    case "forget-host":
+      content = (
+        <ForgetHostScreen
+          entry={forgetEntry ?? ""}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
     case "ssh-terminal":
       content = sshArgv ? (
         <SshTerminalScreen
           argv={sshArgv}
+          label={page.label}
           statusMessage={terminalStatus}
           onExit={handleSshExit}
           onSessionChange={handleSessionChange}

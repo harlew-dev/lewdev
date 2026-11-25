@@ -31,8 +31,11 @@ Bun may not be on `PATH` in non-login shells; use `~/.bun/bin/bun` when needed.
 - SDK calls go through `packages/core/src/client.ts`. The `AerolSdk` interface exists so tests can
   inject a fake instead of contacting a server.
 - The TUI must not crash on SDK or filesystem errors: show an inline message or toast.
-- SSH uses the system `ssh` binary with `-i <key> -p 2220 <sandbox-id>@<host>`. The host is derived
-  from the configured API URL's hostname. SSH goes only through the AerolVM gateway
+- SSH uses the system `ssh` binary with
+  `-i <key> -p 2220 -o UserKnownHostsFile=<config-dir>/known_hosts <sandbox-id>@<host>`, run in a PTY
+  inside the TUI. The host is derived from the configured API URL's hostname. lewdev keeps gateway
+  host keys in its own `known_hosts` (mode 0600) and never edits `~/.ssh/known_hosts`; "Forget saved
+  host key" clears an entry with `ssh-keygen -R` behind a confirmation. SSH goes only through the AerolVM gateway
   (https://microvm.aerol.ai/ssh-access/) for now: no sshd in sandboxes, no user-supplied keys.
 - Keep destructive actions behind a confirmation and never log the API token or private keys.
 

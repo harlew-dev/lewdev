@@ -47,6 +47,11 @@ export function DetailsScreen({
   return (
     <box flexDirection="column" flexGrow={1} gap={0}>
       <box
+        border
+        borderStyle="rounded"
+        borderColor={colors.border}
+        title="Sandbox"
+        titleColor={colors.accent}
         backgroundColor={colors.panel}
         paddingLeft={2}
         paddingRight={2}
@@ -55,7 +60,6 @@ export function DetailsScreen({
         gap={1}
         flexShrink={0}
       >
-        <text fg={colors.accent}>Sandbox</text>
         <box flexDirection="column" gap={0}>
           <InfoRow label="Name / ID">
             <text fg={details.name ? colors.text : colors.muted}>

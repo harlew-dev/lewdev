@@ -1,7 +1,7 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useEffect, useRef } from "react";
 
-import { Field } from "../components";
+import { Field, FormButton } from "../components";
 import {
   type CreateFocus,
   type CreateFormValues,
@@ -32,6 +32,7 @@ const FOCUS_IDS: Record<CreateFocus, string> = {
   "size-memory": "create-size-memory",
   "size-disk": "create-size-disk",
   name: "create-name",
+  submit: "create-submit",
 };
 
 const MENU_ROWS = 4;
@@ -171,13 +172,13 @@ export function CreateScreen({
                     border
                     borderStyle="rounded"
                     borderColor={selected ? colors.accent : colors.border}
+                    title={choice.label}
+                    titleColor={tone}
                     flexDirection="column"
-                    paddingLeft={1}
-                    paddingRight={1}
                   >
-                    <text fg={tone}>{choice.label}</text>
                     <text fg={tone}>{preset ? `${preset.cpu} vCPU` : "cpu / mem"}</text>
                     <text fg={tone}>{preset ? `${preset.memoryMB / 1024} GB` : "disk"}</text>
+                    {preset ? <text fg={tone}>{preset.diskGB} GB disk</text> : null}
                   </box>
                 );
               })}
@@ -232,6 +233,10 @@ export function CreateScreen({
               {error}
             </text>
           ) : null}
+
+          <box id="create-submit">
+            <FormButton label="Create sandbox" active={focus === "submit"} />
+          </box>
         </box>
       </box>
     </scrollbox>

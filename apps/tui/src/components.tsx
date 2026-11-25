@@ -205,6 +205,20 @@ export function Field({
   );
 }
 
+export function FormButton({ label, active }: { label: string; active: boolean }) {
+  return (
+    <box
+      flexDirection="row"
+      flexShrink={0}
+      paddingLeft={1}
+      paddingRight={1}
+      backgroundColor={active ? colors.selection : colors.panelAlt}
+    >
+      <text fg={active ? colors.accent : colors.text}>{label}</text>
+    </box>
+  );
+}
+
 export function StatusText({ status, label }: { status: string; label?: string }) {
   return (
     <box

@@ -24,6 +24,7 @@ export interface SshExitResult {
 
 interface SshTerminalScreenProps {
   argv: string[];
+  label: string;
   statusMessage: string | null;
   onExit: (result: SshExitResult) => void;
   onSessionChange: (session: SshSessionHandle | null) => void;
@@ -53,6 +54,7 @@ const SSH_ENV = buildEnvironment();
  */
 export function SshTerminalScreen({
   argv,
+  label,
   statusMessage,
   onExit,
   onSessionChange,
@@ -183,7 +185,17 @@ export function SshTerminalScreen({
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={3}>
-      <box flexGrow={1} width="100%">
+      <box
+        border
+        borderStyle="rounded"
+        borderColor={colors.border}
+        title={`ssh ${label}`}
+        titleColor={colors.accent}
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={3}
+      >
         <embedded-terminal
           ref={emulatorRef}
           width="100%"

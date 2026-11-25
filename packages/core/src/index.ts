@@ -30,4 +30,13 @@ export {
   savePrivateKey,
 } from "./keys.js";
 export type { SshTarget } from "./ssh.js";
-export { buildSshArgv, formatSshCommand, SSH_PORT, sshHostFromApiUrl } from "./ssh.js";
+export {
+  buildSshArgv,
+  ensureKnownHostsFile,
+  forgetHostKey,
+  formatSshCommand,
+  getKnownHostsPath,
+  knownHostsEntry,
+  SSH_PORT,
+  sshHostFromApiUrl,
+} from "./ssh.js";
