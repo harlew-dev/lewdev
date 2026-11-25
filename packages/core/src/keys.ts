@@ -1,7 +1,8 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getConfigDir } from "./config.js";
+import { ensurePrivateDir } from "./private-dir.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -15,7 +16,10 @@ export function sanitizeSandboxId(sandboxId: string): string {
     !sandboxId ||
     sandboxId === "." ||
     sandboxId === ".." ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sandboxId)
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sandboxId) ||
+    (process.platform === "win32" &&
+      (sandboxId.endsWith(".") ||
+        /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(sandboxId)))
   ) {
     throw new KeyStorageError(`Invalid sandbox ID for key storage: ${JSON.stringify(sandboxId)}`);
   }
@@ -51,10 +55,8 @@ export async function savePrivateKey(
   const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
 
   try {
-    await mkdir(configDir, { recursive: true, mode: 0o700 });
-    await chmod(configDir, 0o700);
-    await mkdir(keysDir, { recursive: true, mode: 0o700 });
-    await chmod(keysDir, 0o700);
+    await ensurePrivateDir(configDir);
+    await ensurePrivateDir(keysDir);
     await writeFile(tmpPath, contents, { mode: 0o600 });
     await chmod(tmpPath, 0o600);
     await rename(tmpPath, path);

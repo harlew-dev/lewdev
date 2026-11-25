@@ -79,6 +79,16 @@ export async function readClipboard(options: ReadClipboardOptions = {}): Promise
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const candidates: string[][] = [];
+  if (platform === "win32") {
+    candidates.push([
+      "powershell.exe",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Sta",
+      "-Command",
+      "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write((Get-Clipboard -Raw -ErrorAction Stop))",
+    ]);
+  }
   if (env.WAYLAND_DISPLAY?.trim()) {
     candidates.push(["wl-paste", "--no-newline"]);
   }
@@ -118,6 +128,16 @@ export async function writeClipboard(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const candidates: string[][] = [];
+  if (platform === "win32") {
+    candidates.push([
+      "powershell.exe",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Sta",
+      "-Command",
+      "[Console]::InputEncoding = [Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd()) -ErrorAction Stop",
+    ]);
+  }
   if (env.WAYLAND_DISPLAY?.trim()) {
     candidates.push(["wl-copy"]);
   }

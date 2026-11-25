@@ -60,7 +60,7 @@ export function ConnectScreen({ form, activeField, busy, error, configPath }: Co
           </text>
         ) : null}
         <text fg={colors.muted} wrapMode="word">
-          Config file: {configPath} (0600)
+          Config file: {configPath}
         </text>
         <box id="connect-submit">
           <FormButton label="Save" active={activeField === "submit"} />

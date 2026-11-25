@@ -1,6 +1,8 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { ensurePrivateDir } from "./private-dir.js";
 
 export interface LewdevConfig {
   /** Base URL of the AerolVM server, for example `http://127.0.0.1:8080`. */
@@ -163,8 +165,7 @@ export async function saveConfig(
   const payload = `${JSON.stringify({ apiUrl, apiToken }, null, 2)}\n`;
 
   try {
-    await mkdir(configDir, { recursive: true, mode: 0o700 });
-    await chmod(configDir, 0o700);
+    await ensurePrivateDir(configDir);
     await writeFile(tmpPath, payload, { mode: 0o600 });
     await chmod(tmpPath, 0o600);
     await rename(tmpPath, configPath);

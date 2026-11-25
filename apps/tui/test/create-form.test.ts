@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 
 import {
   CREATE_DEFAULT,
@@ -183,12 +184,16 @@ describe("image options", () => {
 
 describe("dockerfile paths", () => {
   test("expands ~ and resolves relative paths", () => {
-    expect(expandHomePath("~/Builds/Dockerfile", "/home/me")).toBe("/home/me/Builds/Dockerfile");
+    expect(expandHomePath("~/Builds/Dockerfile", "/home/me")).toBe(
+      join("/home/me", "Builds/Dockerfile"),
+    );
     expect(expandHomePath("~", "/home/me")).toBe("/home/me");
     expect(resolveDockerfilePath("docker/Dockerfile", "/work", "/home/me")).toBe(
-      "/work/docker/Dockerfile",
+      resolve("/work", "docker/Dockerfile"),
     );
-    expect(resolveDockerfilePath("~/Dockerfile", "/work", "/home/me")).toBe("/home/me/Dockerfile");
+    expect(resolveDockerfilePath("~/Dockerfile", "/work", "/home/me")).toBe(
+      join("/home/me", "Dockerfile"),
+    );
   });
 
   test("counts pasted lines", () => {

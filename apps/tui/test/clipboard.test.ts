@@ -181,3 +181,15 @@ describe("writeClipboard", () => {
     expect(calls.every((call) => call.timeoutMs === 75)).toBe(true);
   });
 });
+
+test("uses PowerShell for Windows clipboard reads and writes", async () => {
+  const { spawn, calls } = fakeSpawn(() => ({ exitCode: 0, stdout: "copied" }));
+  const options = { spawn, env: {}, platform: "win32" } as const;
+
+  expect(await readClipboard(options)).toBe("copied");
+  expect(await writeClipboard("two words", options)).toBe(true);
+  expect(calls.map((call) => call.argv[0])).toEqual(["powershell.exe", "powershell.exe"]);
+  expect(calls[0]?.argv.at(-1)).toContain("Get-Clipboard");
+  expect(calls[1]?.argv.at(-1)).toContain("Set-Clipboard");
+  expect(calls[1]?.stdin).toBe("two words");
+});

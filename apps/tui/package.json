@@ -15,14 +15,10 @@
   "dependencies": {
     "@lewdev/core": "workspace:*",
     "@opentui/core": "0.9.9",
-    "@opentui/core-linux-x64-musl": "0.9.9",
     "@opentui/react": "0.9.9",
     "react": "19.3.1"
   },
   "devDependencies": {
     "@types/react": "19.3.3"
-  },
-  "optionalDependencies": {
-    "@opentui/core-linux-x64": "0.9.9"
   }
 }

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,10 @@ import {
 
 let root = "";
 let env: Record<string, string> = {};
+const posixModes = process.platform !== "win32";
+
+// Windows directory protection shells out to PowerShell, which can be slow to start.
+setDefaultTimeout(30_000);
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "lewdev-config-"));
@@ -36,8 +40,10 @@ describe("config", () => {
 
     const dirMode = (await stat(getConfigDir(env))).mode & 0o777;
     const fileMode = (await stat(getConfigPath(env))).mode & 0o777;
-    expect(dirMode).toBe(0o700);
-    expect(fileMode).toBe(0o600);
+    if (posixModes) {
+      expect(dirMode).toBe(0o700);
+      expect(fileMode).toBe(0o600);
+    }
 
     const raw = await readFile(getConfigPath(env), "utf8");
     expect(JSON.parse(raw)).toEqual({ apiUrl: "http://localhost:8080", apiToken: "secret" });
@@ -112,7 +118,9 @@ describe("config", () => {
   test("keeps the file private when overwriting", async () => {
     await saveConfig({ apiUrl: "https://one.example.com", apiToken: "one" }, env);
     await saveConfig({ apiUrl: "https://two.example.com", apiToken: "two" }, env);
-    expect((await stat(getConfigPath(env))).mode & 0o777).toBe(0o600);
+    if (posixModes) {
+      expect((await stat(getConfigPath(env))).mode & 0o777).toBe(0o600);
+    }
   });
 });
 

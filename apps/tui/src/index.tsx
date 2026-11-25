@@ -13,7 +13,7 @@ Usage: lewdev [--help] [--version]
 
 Configuration:
   $XDG_CONFIG_HOME/lewdev/config.json (or ~/.config/lewdev/config.json)
-  The file and its directory are chmod 0600 / 0700.
+  On Windows, the default is %USERPROFILE%\\.config\\lewdev\\config.json.
 
 Environment overrides:
   SB_API_URL    AerolVM server URL

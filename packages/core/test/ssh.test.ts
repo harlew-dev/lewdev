@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,12 @@ import {
   SSH_PORT,
   sshHostFromApiUrl,
 } from "../src/index.js";
+
+const posixModes = process.platform !== "win32";
+const hasSshKeygen = Bun.which("ssh-keygen") !== null;
+
+// Windows directory protection shells out to PowerShell, which can be slow to start.
+setDefaultTimeout(30_000);
 
 describe("ssh helpers", () => {
   test("derives the host from the API URL", () => {
@@ -91,14 +97,27 @@ describe("lewdev known_hosts", () => {
     }
   });
 
-  test("creates the file privately and forgets only the gateway entry", async () => {
+  test("creates the known_hosts file in the config dir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lewdev-kh-"));
+    const env = { XDG_CONFIG_HOME: dir };
+    try {
+      expect(await forgetHostKey("gw.example.test", 2220, env)).toBe(false);
+
+      const path = await ensureKnownHostsFile(env);
+      expect(path).toBe(getKnownHostsPath(env));
+      if (posixModes) {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(!hasSshKeygen)("forgets only the gateway entry with ssh-keygen", async () => {
     const dir = await mkdtemp(join(tmpdir(), "lewdev-kh-"));
     const env = { XDG_CONFIG_HOME: dir };
     try {
       const path = await ensureKnownHostsFile(env);
-      expect(path).toBe(getKnownHostsPath(env));
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
-      expect(await forgetHostKey("gw.example.test", 2220, env)).toBe(false);
 
       const key =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHX4t6KUKuw2kz9jpzjR+jTLn8dXd5b7aFCHYRcXojRv";
@@ -107,7 +126,9 @@ describe("lewdev known_hosts", () => {
       const remaining = await readFile(path, "utf8");
       expect(remaining).not.toContain("gw.example.test");
       expect(remaining).toContain("other.example.test");
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      if (posixModes) {
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

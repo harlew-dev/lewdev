@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, open, stat } from "node:fs/promises";
+import { chmod, open, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getConfigDir, normalizeApiUrl } from "./config.js";
 import { sanitizeSandboxId } from "./keys.js";
+import { ensurePrivateDir } from "./private-dir.js";
 
 type Env = Record<string, string | undefined>;
 
@@ -37,7 +38,11 @@ export function buildSshArgv(target: SshTarget): string[] {
 
   const argv = ["ssh", "-i", target.keyPath, "-p", String(port)];
   if (target.knownHostsPath) {
-    argv.push("-o", `UserKnownHostsFile=${target.knownHostsPath}`);
+    const path =
+      process.platform === "win32"
+        ? target.knownHostsPath.replaceAll("\\", "/")
+        : target.knownHostsPath;
+    argv.push("-o", `UserKnownHostsFile=${path}`);
   }
   argv.push(`${sandboxId}@${target.host}`);
   return argv;
@@ -46,6 +51,9 @@ export function buildSshArgv(target: SshTarget): string[] {
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
     return value;
+  }
+  if (process.platform === "win32") {
+    return `'${value.replaceAll("'", "''")}'`;
   }
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
@@ -63,8 +71,7 @@ export function getKnownHostsPath(env: Env = process.env): string {
 export async function ensureKnownHostsFile(env: Env = process.env): Promise<string> {
   const configDir = getConfigDir(env);
   const path = getKnownHostsPath(env);
-  await mkdir(configDir, { recursive: true, mode: 0o700 });
-  await chmod(configDir, 0o700);
+  await ensurePrivateDir(configDir);
   const handle = await open(path, "a", 0o600);
   await handle.close();
   await chmod(path, 0o600);

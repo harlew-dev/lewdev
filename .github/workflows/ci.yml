@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Format, lint, typecheck and test
+        run: bun run check
+
+      - name: Build standalone binary
+        run: bun run build
+
+      - name: Smoke test standalone binary in isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f dist/lewdev.exe ]; then
+            binary=dist/lewdev.exe
+          else
+            binary=dist/lewdev
+          fi
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cp "$binary" "$work/"
+          cd "$work"
+          "./$(basename "$binary")" --version
+          "./$(basename "$binary")" --help > /dev/null

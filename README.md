@@ -1,83 +1,30 @@
-# lewdev
+<h1 align="center">Lewdev</h1>
 
-A terminal client for [AerolVM](https://microvm.aerol.ai/) sandboxes. lewdev connects to an
-AerolVM server, creates sandboxes from an image, starts and stops them, exposes ports, and opens
-an SSH session with the system `ssh` client.
+<p align="center">Manage AerolVM sandboxes from your terminal.</p>
 
-The repository is a Bun workspace. The reusable logic lives in a UI-free core package; the TUI is
-the first app, and web/desktop apps can reuse the same core later.
+---
 
-## Requirements
+### Quick start
 
-- Bun 1.4.5 or newer (`~/.bun/bin/bun` if Bun is not on your `PATH`)
-- A running AerolVM server
-- The system `ssh` client for the `S` shortcut
-
-## Install and run
+You'll need [Bun 1.4.5 or newer](https://bun.com/docs/installation), an [AerolVM](https://microvm.aerol.ai/) API URL and token, and OpenSSH for sandbox access. On Windows, use PowerShell in Windows Terminal with the [OpenSSH Client](https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse) installed.
 
 ```sh
-bun install
+git clone https://github.com/harlew-dev/lewdev.git
+cd lewdev
+bun install --frozen-lockfile
 bun run dev
 ```
 
-`bun run build` compiles a standalone binary to `dist/lewdev`:
+Enter your API URL and token on the Connect screen. Use the arrow keys and Enter to select a sandbox and manage its lifecycle, ports, or SSH session. Press `n` to create a sandbox and `Esc` to go back.
 
-```sh
-bun run build
-./dist/lewdev
-```
+### Build
 
-Run `lewdev --help` for the non-interactive usage summary.
+Run `bun run build`. Launch `./dist/lewdev` on Linux or macOS, or `.\dist\lewdev.exe` in PowerShell.
 
-## Configuration
+### Configuration
 
-On first run, lewdev opens a Connect screen. Enter the AerolVM API URL and token; lewdev verifies
-the server with its health check before saving. The config is written to:
+Lewdev stores its config, sandbox SSH keys, and gateway host keys under `$XDG_CONFIG_HOME/lewdev` or `~/.config/lewdev`. On Windows the default is `%USERPROFILE%\.config\lewdev`. Set `SB_API_URL` and `SB_API_TOKEN` to override the saved values. SSH keys are saved when you create a sandbox through Lewdev.
 
-```
-$XDG_CONFIG_HOME/lewdev/config.json   # or ~/.config/lewdev/config.json
-```
+### Contributing
 
-The directory is created with mode `0700` and the file with mode `0600`.
-
-`SB_API_URL` and `SB_API_TOKEN` override the file field by field. A config is usable only when both
-the URL and token are present. Press `c` in the TUI to reopen the Connect screen.
-
-Sandbox private keys are returned by AerolVM only at create time. lewdev saves them to
-`$XDG_CONFIG_HOME/lewdev/keys/<sandbox-id>` with mode `0600` and deletes a key when the sandbox is
-deleted through lewdev. For sandboxes created elsewhere, the TUI reports that no key is stored.
-
-## Keyboard
-
-| Key       | Action                     |
-| --------- | -------------------------- |
-| `n`       | New sandbox                |
-| `s` / `x` | Start / stop               |
-| `R`       | Restart (stop, then start) |
-| `d`       | Delete, with confirmation  |
-| `enter`   | Details                    |
-| `S`       | SSH (suspends the TUI)     |
-| `p`       | Ports                      |
-| `c`       | Connect screen             |
-| `q`       | Quit                       |
-
-The sandbox list refreshes every three seconds. Errors appear inline or as a toast and do not exit
-the TUI.
-
-## Workspace
-
-```
-packages/core   SDK wrapper, config, key storage, SSH helpers (no UI imports)
-apps/tui        OpenTUI React app and the `lewdev` binary
-```
-
-## Checks
-
-```sh
-bun run format       # rewrite formatting
-bun run check        # format check, lint, typecheck, tests
-bun run build        # standalone binary
-```
-
-Core tests use temporary config directories and a fake SDK; they never read or write the real
-`~/.config/lewdev` and do not contact an AerolVM server.
+Run `bun run check` for formatting, lint, types, and tests. See [AGENTS.md](AGENTS.md) for the workspace layout.
