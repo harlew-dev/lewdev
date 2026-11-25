@@ -1,0 +1,29 @@
+{
+  "name": "lewdev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.5",
+  "engines": {
+    "bun": ">=1.4.5"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/tui dev",
+    "build": "bun run --cwd apps/tui build",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p apps/tui/tsconfig.json --noEmit",
+    "test": "bun test",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.9",
+    "@types/bun": "1.4.5",
+    "typescript": "5.9.3"
+  }
+}

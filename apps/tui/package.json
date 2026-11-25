@@ -1,0 +1,28 @@
+{
+  "name": "@lewdev/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "lewdev": "./src/index.tsx"
+  },
+  "scripts": {
+    "dev": "bun run --watch src/index.tsx",
+    "start": "bun run src/index.tsx",
+    "build": "bun build --compile src/index.tsx --outfile ../../dist/lewdev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@lewdev/core": "workspace:*",
+    "@opentui/core": "0.9.9",
+    "@opentui/core-linux-x64-musl": "0.9.9",
+    "@opentui/react": "0.9.9",
+    "react": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.3"
+  },
+  "optionalDependencies": {
+    "@opentui/core-linux-x64": "0.9.9"
+  }
+}

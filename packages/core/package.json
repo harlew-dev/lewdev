@@ -1,0 +1,16 @@
+{
+  "name": "@lewdev/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aerol-ai/aerolvm-sdk": "0.8.3"
+  }
+}
