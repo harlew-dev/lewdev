@@ -20,8 +20,11 @@ Environment overrides:
   SB_API_TOKEN  AerolVM API token
 
 Keys:
-  n new · s start · x stop · R restart · d delete · enter details
-  S ssh · p ports · c connect · q quit
+  ↑/↓ or j/k move · enter select/open · esc back · ctrl+c quit
+  Sandbox list: n new · c connect · q quit
+  Sandbox page: enter runs the selected action
+  Ports page: o open port · x close port
+  SSH session: ctrl+] closes the session
 
 Private sandbox keys are stored in the same config directory under keys/.
 `;

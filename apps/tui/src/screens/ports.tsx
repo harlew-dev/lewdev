@@ -1,23 +1,14 @@
-import type { PortVisibility, SandboxDetails } from "@lewdev/core";
+import type { SandboxDetails } from "@lewdev/core";
 import { useTerminalDimensions } from "@opentui/react";
 
-import { Field, Panel } from "../components";
-import { sandboxLabel } from "../format";
+import { Panel } from "../components";
 import { colors } from "../theme";
-
-export interface PortFormValues {
-  field: "port" | "visibility";
-  port: string;
-  visibility: PortVisibility;
-}
 
 interface PortsScreenProps {
   details: SandboxDetails | null;
   selected: number;
   loading: boolean;
   error: string | null;
-  form: PortFormValues | null;
-  formError: string | null;
 }
 
 const WIDTHS = {
@@ -26,22 +17,15 @@ const WIDTHS = {
   visibility: 12,
 } as const;
 
-export function PortsScreen({
-  details,
-  selected,
-  loading,
-  error,
-  form,
-  formError,
-}: PortsScreenProps) {
+export function PortsScreen({ details, selected, loading, error }: PortsScreenProps) {
   const { height } = useTerminalDimensions();
   const ports = details?.exposedPorts ?? [];
-  const rows = Math.max(3, height - (form ? 20 : 14));
+  const rows = Math.max(3, height - 14);
   const start = Math.max(0, Math.min(selected - Math.floor(rows / 2), ports.length - rows));
   const visible = ports.slice(start, start + rows);
 
   return (
-    <Panel title={details ? `Ports · ${sandboxLabel(details)}` : "Ports"} width={86}>
+    <Panel title="Ports" width={86}>
       {!details ? (
         <text fg={loading ? colors.muted : colors.error}>
           {loading ? "Loading ports…" : (error ?? "Ports are unavailable.")}
@@ -107,32 +91,6 @@ export function PortsScreen({
               </box>
             );
           })}
-
-          {form ? (
-            <box flexDirection="column" gap={1} paddingTop={1}>
-              <text fg={colors.muted}>Open a port</text>
-              <Field
-                label="Port"
-                value={form.port}
-                active={form.field === "port"}
-                placeholder="8080"
-              />
-              <Field
-                label="Visibility"
-                value={form.visibility}
-                active={form.field === "visibility"}
-                display={`[ ${form.visibility} ]`}
-              />
-              <text fg={colors.muted}>
-                public serves anyone with the URL; token requires a sandbox token.
-              </text>
-              {formError ? (
-                <text fg={colors.error} wrapMode="word">
-                  {formError}
-                </text>
-              ) : null}
-            </box>
-          ) : null}
         </>
       )}
     </Panel>

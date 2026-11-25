@@ -49,12 +49,32 @@ export function formatDateTime(iso: string): string {
   }).format(date);
 }
 
-export function formatResources(cpu: number, memoryMB: number): string {
-  return `${cpu}c / ${memoryMB}MB`;
+export function formatCpu(cpu: number): string {
+  return `${cpu} vCPU`;
 }
 
+export function formatMemory(memoryMB: number): string {
+  if (memoryMB >= 1024) {
+    const gb = memoryMB / 1024;
+    return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+  }
+  return `${memoryMB} MB`;
+}
+
+export function formatDisk(diskGB: number): string {
+  return `${diskGB} GB`;
+}
+
+/** Display label for a sandbox status; the API's raw values stay untouched elsewhere. */
 export function shortStatus(status: string): string {
-  return status === "awaiting_runtime" ? "awaiting" : status;
+  switch (status) {
+    case "started":
+      return "running";
+    case "awaiting_runtime":
+      return "awaiting";
+    default:
+      return status;
+  }
 }
 
 export function safeHost(apiUrl: string): string {

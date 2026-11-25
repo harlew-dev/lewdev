@@ -7,6 +7,7 @@ import type {
   HealthStatus,
   ListOptions,
 } from "@aerol-ai/aerolvm-sdk";
+import { Image } from "@aerol-ai/aerolvm-sdk";
 
 import { type AerolSdk, LewdevApi, type SandboxInfo, type SdkSandbox } from "../src/index.js";
 
@@ -164,6 +165,34 @@ describe("LewdevApi", () => {
     await api.createSandbox({ image: "ubuntu:24.04" });
     expect(calls[0]?.args[0]).toEqual({ image: "ubuntu:24.04" });
     expect(calls[0]?.args[0]).not.toHaveProperty("name");
+  });
+
+  test("creates from Dockerfile contents with an Image builder", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.createSandbox({
+      dockerfile: "FROM ubuntu:24.04\nRUN echo hi\n",
+      name: "  build  ",
+      cpu: 2,
+    });
+
+    const options = calls[0]?.args[0] as CreateOptions;
+    expect(options.image).toBeInstanceOf(Image);
+    expect((options.image as Image).dockerfile).toBe("FROM ubuntu:24.04\nRUN echo hi\n");
+    expect(options.name).toBe("build");
+    expect(options.cpu).toBe(2);
+  });
+
+  test("requires exactly one of image or Dockerfile", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await expect(api.createSandbox({})).rejects.toThrow("An image or Dockerfile is required.");
+    await expect(
+      api.createSandbox({ image: "ubuntu:24.04", dockerfile: "FROM scratch" }),
+    ).rejects.toThrow("Provide either an image or a Dockerfile, not both.");
+    expect(calls).toHaveLength(0);
   });
 
   test("maps details including the SSH public key", async () => {

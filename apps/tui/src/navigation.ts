@@ -1,0 +1,93 @@
+export interface SandboxPageTarget {
+  id: string;
+  label: string;
+}
+
+export type Page =
+  | { kind: "sandboxes" }
+  | { kind: "connect" }
+  | { kind: "new-sandbox" }
+  | ({ kind: "sandbox" } & SandboxPageTarget)
+  | ({ kind: "ssh-details" } & SandboxPageTarget)
+  | ({ kind: "ports" } & SandboxPageTarget)
+  | ({ kind: "open-port" } & SandboxPageTarget)
+  | ({ kind: "delete-sandbox" } & SandboxPageTarget)
+  | ({ kind: "ssh-terminal" } & SandboxPageTarget);
+
+export const ROOT_PAGE: Page = { kind: "sandboxes" };
+
+const CRUMB_LABELS: Record<Page["kind"], string | null> = {
+  sandboxes: "Sandboxes",
+  connect: "Connect",
+  "new-sandbox": "New sandbox",
+  sandbox: null,
+  "ssh-details": "SSH details",
+  ports: "Ports",
+  "open-port": "Open port",
+  "delete-sandbox": "Delete sandbox",
+  "ssh-terminal": "SSH terminal",
+};
+
+export function currentPage(stack: Page[]): Page {
+  return stack[stack.length - 1] ?? ROOT_PAGE;
+}
+
+export function pushPage(stack: Page[], page: Page): Page[] {
+  return [...stack, page];
+}
+
+/** Removes the top page. Popping the root is a no-op. */
+export function popPage(stack: Page[]): Page[] {
+  return stack.length <= 1 ? stack : stack.slice(0, -1);
+}
+
+/**
+ * Pushes a sandbox-scoped page. From the list this inserts the sandbox page
+ * underneath so breadcrumbs name the sandbox and esc lands on it.
+ */
+export function pushSandboxScoped(stack: Page[], next: Page): Page[] {
+  const target = pageSandbox(next);
+  if (currentPage(stack).kind === "sandboxes" && target) {
+    return pushPage(pushPage(stack, { kind: "sandbox", ...target }), next);
+  }
+  return pushPage(stack, next);
+}
+
+/** Every sandbox-scoped page carries the sandbox target; the others do not. */
+export function pageSandbox(page: Page): SandboxPageTarget | null {
+  switch (page.kind) {
+    case "sandboxes":
+    case "connect":
+    case "new-sandbox":
+      return null;
+    default:
+      return { id: page.id, label: page.label };
+  }
+}
+
+export function breadcrumbTrail(stack: Page[]): string[] {
+  return stack.map((page) => {
+    if (page.kind === "sandbox") {
+      return page.label;
+    }
+    return CRUMB_LABELS[page.kind] ?? page.kind;
+  });
+}
+
+/**
+ * Leaves the SSH terminal and lands on the sandbox page for that sandbox. If
+ * the stack has no sandbox page, one is pushed so the user always ends up
+ * where the session belongs.
+ */
+export function backFromTerminal(stack: Page[], target: SandboxPageTarget): Page[] {
+  const popped = popPage(stack);
+  const top = popped[popped.length - 1];
+  if (top?.kind === "sandbox" && top.id === target.id) {
+    return popped;
+  }
+  const index = popped.findIndex((page) => page.kind === "sandbox" && page.id === target.id);
+  if (index >= 0) {
+    return popped.slice(0, index + 1);
+  }
+  return pushPage(popped, { kind: "sandbox", ...target });
+}

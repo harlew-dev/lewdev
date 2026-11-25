@@ -20,65 +20,78 @@ import {
 import type { KeyEvent } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
 import { useKeyboard, usePaste, useRenderer } from "@opentui/react";
+import { readFile } from "node:fs/promises";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  actionHints,
+  actionIndex,
+  actionKey,
+  type ActionHint,
+  type ActionId,
+  buildConnectActions,
+  buildDeleteActions,
+  buildNewSandboxActions,
+  buildOpenPortActions,
+  buildPortsPageActions,
+  buildSandboxListActions,
+  buildSandboxPageActions,
+  buildSandboxPageGroups,
+  buildSshDetailsActions,
+  findActionForKey,
+  nextActionId,
+  type PageAction,
+} from "./actions";
 import { readClipboard, writeClipboard } from "./clipboard";
-import {
-  BusyLine,
-  ConfirmDialog,
-  Header,
-  type KeyHint,
-  KeyHints,
-  ToastLine,
-  type ToastMessage,
-} from "./components";
-import {
-  buildDetailsMenu,
-  type DetailsActionId,
-  type DetailsMenuItem,
-  detailsSelectionIndex,
-  nextDetailsSelection,
-} from "./details-menu";
+import { BusyLine, Header, KeyHints, ToastLine, type ToastMessage } from "./components";
 import { safeHost, sandboxLabel } from "./format";
+import {
+  backFromTerminal,
+  breadcrumbTrail,
+  currentPage,
+  pageSandbox,
+  type Page,
+  popPage,
+  pushPage,
+  pushSandboxScoped as pushScopedPage,
+  ROOT_PAGE,
+  type SandboxPageTarget,
+} from "./navigation";
 import { type ConnectFormState, ConnectScreen } from "./screens/connect";
 import {
   CREATE_DEFAULT,
-  CREATE_FIELDS,
+  type CreateFocus,
   type CreateFormValues,
-  CreateScreen,
-} from "./screens/create";
+  createSizeInput,
+  IMAGE_OPTIONS,
+  imageOptionIndex,
+  moveSize,
+  nextCreateFocus,
+  resolveDockerfilePath,
+  selectImageOption,
+} from "./create-form";
+import { CreateScreen } from "./screens/create";
+import { DeleteSandboxScreen } from "./screens/delete-sandbox";
 import { DetailsScreen } from "./screens/details";
 import { ListScreen } from "./screens/list";
-import { type PortFormValues, PortsScreen } from "./screens/ports";
+import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
+import { PortsScreen } from "./screens/ports";
 import { SshDetailsScreen } from "./screens/ssh-details";
+import {
+  type SshExitResult,
+  type SshSessionHandle,
+  SshTerminalScreen,
+} from "./screens/ssh-terminal";
 import { colors } from "./theme";
-
-type Screen =
-  | { kind: "list" }
-  | { kind: "connect" }
-  | { kind: "create" }
-  | { kind: "details"; id: string }
-  | { kind: "ports"; id: string };
 
 type ConnectField = "url" | "token";
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
-function shortcut(key: KeyEvent, name: string): "plain" | "shift" | null {
-  if (key.ctrl || key.meta) {
-    return null;
-  }
-  const keyName = key.name.length === 1 ? key.name.toLowerCase() : key.name;
-  if (keyName !== name) {
-    return null;
-  }
-  const sequence = key.sequence;
-  const sequenceIsUpper =
-    sequence.length === 1 &&
-    sequence !== sequence.toLowerCase() &&
-    sequence === sequence.toUpperCase();
-  return key.shift || sequenceIsUpper ? "shift" : "plain";
-}
+const NO_KEY_REASON =
+  "No private key is stored for this sandbox. The key is only available for sandboxes created by lewdev.";
+const CLIPBOARD_ERROR =
+  "Couldn't read the clipboard. Use your terminal's paste (usually Ctrl+Shift+V).";
 
 function printableChar(key: KeyEvent): string | null {
   if (key.ctrl || key.meta) {
@@ -105,26 +118,36 @@ function removeLastChar(value: string): string {
   return [...value].slice(0, -1).join("");
 }
 
-function parseOptionalNumber(raw: string, label: string, integer: boolean): number | undefined {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return undefined;
+function targetForSandbox(sandbox: SandboxInfo): SandboxPageTarget {
+  return { id: sandbox.id, label: sandboxLabel(sandbox) };
+}
+
+async function readDockerfileContents(values: CreateFormValues): Promise<string> {
+  if (values.dockerfileContents.trim().length > 0) {
+    return values.dockerfileContents;
   }
-  const value = Number(trimmed);
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${label} must be a positive number.`);
+  const path = values.dockerfilePath.trim();
+  if (!path) {
+    throw new Error("Dockerfile path is required.");
   }
-  if (integer && !Number.isInteger(value)) {
-    throw new Error(`${label} must be a whole number.`);
+  const resolved = resolveDockerfilePath(path);
+  let contents: string;
+  try {
+    contents = await readFile(resolved, "utf8");
+  } catch (error) {
+    throw new Error(`Could not read ${resolved}: ${describeError(error)}`);
   }
-  return value;
+  if (!contents.trim()) {
+    throw new Error(`The Dockerfile at ${resolved} is empty.`);
+  }
+  return contents;
 }
 
 export function App() {
   const renderer = useRenderer();
 
   const [booting, setBooting] = useState(true);
-  const [screen, setScreen] = useState<Screen>({ kind: "list" });
+  const [stack, setStack] = useState<Page[]>([ROOT_PAGE]);
   const [config, setConfig] = useState<LewdevConfig | null>(null);
   const [configPath, setConfigPath] = useState("");
   const [api, setApi] = useState<LewdevApi | null>(null);
@@ -141,14 +164,14 @@ export function App() {
   const [selected, setSelected] = useState(0);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<SandboxInfo | null>(null);
   const hasSandboxes = useRef(false);
   const clipboardBusy = useRef(false);
-  const insertPasteRef = useRef<(text: string) => void>(() => {});
 
   const [createValues, setCreateValues] = useState<CreateFormValues>(CREATE_DEFAULT);
-  const [createField, setCreateField] = useState(0);
+  const [createFocus, setCreateFocus] = useState<CreateFocus>("image");
   const [createError, setCreateError] = useState<string | null>(null);
+  const [imageMenuOpen, setImageMenuOpen] = useState(false);
+  const [imageMenuIndex, setImageMenuIndex] = useState(0);
 
   const [details, setDetails] = useState<SandboxDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -157,17 +180,27 @@ export function App() {
   const [portSelected, setPortSelected] = useState(0);
   const [portForm, setPortForm] = useState<PortFormValues | null>(null);
   const [portFormError, setPortFormError] = useState<string | null>(null);
-  const [detailsActionId, setDetailsActionId] = useState<DetailsActionId>("ssh");
-  const [detailsView, setDetailsView] = useState<"menu" | "ssh">("menu");
+  const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
+  const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
+
+  const sshSession = useRef<SshSessionHandle | null>(null);
+  const stackRef = useRef(stack);
+  stackRef.current = stack;
+
+  const page = currentPage(stack);
+  const sandboxTarget = pageSandbox(page);
+  const sandboxId = sandboxTarget?.id ?? null;
+  const usesDetails =
+    page.kind === "sandbox" ||
+    page.kind === "ssh-details" ||
+    page.kind === "ports" ||
+    page.kind === "open-port";
+  const pageDetails = details && details.id === sandboxId ? details : null;
+  const selectedSandbox = sandboxes[selected];
 
   const showToast = useCallback((kind: ToastMessage["kind"], message: string) => {
     setToast({ kind, message });
   }, []);
-
-  const quit = useCallback(() => {
-    renderer.destroy();
-    process.exit(0);
-  }, [renderer]);
 
   const refreshList = useCallback(
     async (showLoading = false): Promise<SandboxInfo[]> => {
@@ -213,6 +246,24 @@ export function App() {
     [api],
   );
 
+  const quit = useCallback(() => {
+    sshSession.current?.kill();
+    sshSession.current = null;
+    renderer.destroy();
+    process.exit(0);
+  }, [renderer]);
+
+  const push = useCallback((next: Page) => {
+    setSelectedActionId(null);
+    setTerminalStatus(null);
+    setStack((previous) => pushPage(previous, next));
+  }, []);
+
+  const pop = useCallback(() => {
+    setSelectedActionId(null);
+    setStack((previous) => popPage(previous));
+  }, []);
+
   useEffect(() => {
     hasSandboxes.current = sandboxes.length > 0;
   }, [sandboxes.length]);
@@ -229,9 +280,9 @@ export function App() {
         setConfig(loaded.config);
         if (loaded.config) {
           setApi(LewdevApi.fromConfig(loaded.config));
-          setScreen({ kind: "list" });
+          setStack([ROOT_PAGE]);
         } else {
-          setScreen({ kind: "connect" });
+          setStack(pushPage([ROOT_PAGE], { kind: "connect" }));
         }
       } catch (error) {
         if (cancelled) {
@@ -239,7 +290,7 @@ export function App() {
         }
         setConfigPath(getConfigPath());
         setConnectError(describeError(error));
-        setScreen({ kind: "connect" });
+        setStack(pushPage([ROOT_PAGE], { kind: "connect" }));
       } finally {
         if (!cancelled) {
           setBooting(false);
@@ -252,7 +303,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!api || screen.kind !== "list") {
+    if (!api || page.kind !== "sandboxes") {
       return;
     }
     void refreshList(!hasSandboxes.current);
@@ -262,29 +313,30 @@ export function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [api, screen.kind, refreshList]);
+  }, [api, page.kind, refreshList]);
 
   useEffect(() => {
-    setSelected((previous) =>
-      sandboxes.length === 0 ? 0 : Math.min(previous, sandboxes.length - 1),
-    );
+    setSelected((previous) => (sandboxes.length === 0 ? 0 : Math.min(previous, sandboxes.length)));
   }, [sandboxes.length]);
 
   useEffect(() => {
-    if (screen.kind !== "details" && screen.kind !== "ports") {
+    if (!usesDetails || !sandboxId) {
       return;
     }
+    setDetails(null);
+    setDetailsError(null);
+    setKeyAvailable(false);
     setDetailsLoading(true);
-    void loadDetails(screen.id);
-  }, [screen, loadDetails]);
+    void loadDetails(sandboxId);
+  }, [usesDetails, sandboxId, loadDetails]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!details) {
+    if (!pageDetails) {
       setKeyAvailable(false);
       return;
     }
-    privateKeyExists(details.id)
+    privateKeyExists(pageDetails.id)
       .then((exists) => {
         if (!cancelled) {
           setKeyAvailable(exists);
@@ -298,12 +350,12 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [details]);
+  }, [pageDetails]);
 
   useEffect(() => {
-    const count = details?.exposedPorts.length ?? 0;
+    const count = pageDetails?.exposedPorts.length ?? 0;
     setPortSelected((previous) => (count === 0 ? 0 : Math.min(previous, count - 1)));
-  }, [details]);
+  }, [pageDetails]);
 
   useEffect(() => {
     if (!toast) {
@@ -332,22 +384,20 @@ export function App() {
     };
   }, [busyMessage]);
 
-  const selectedSandbox = sandboxes[selected];
-
   const sshCommand = useMemo(() => {
-    if (!details || !config) {
+    if (!pageDetails || !config) {
       return null;
     }
     try {
       return formatSshCommand({
-        sandboxId: details.id,
+        sandboxId: pageDetails.id,
         host: sshHostFromApiUrl(config.apiUrl),
-        keyPath: getKeyPath(details.id),
+        keyPath: getKeyPath(pageDetails.id),
       });
     } catch {
       return null;
     }
-  }, [details, config]);
+  }, [pageDetails, config]);
 
   const gatewayHost = useMemo(() => {
     if (!config) {
@@ -361,118 +411,191 @@ export function App() {
   }, [config]);
 
   const detailsKeyPath = useMemo(() => {
-    if (!details) {
+    if (!pageDetails) {
       return null;
     }
     try {
-      return getKeyPath(details.id);
+      return getKeyPath(pageDetails.id);
     } catch {
       return null;
     }
-  }, [details]);
+  }, [pageDetails]);
 
-  const detailsMenu = useMemo<DetailsMenuItem[]>(() => {
-    if (!details) {
-      return [];
+  const sshArgv = useMemo(() => {
+    if (page.kind !== "ssh-terminal" || !config) {
+      return null;
     }
-    return buildDetailsMenu({
-      status: details.status,
-      keyAvailable,
-      sshCommandAvailable: sshCommand !== null,
-    });
-  }, [details, keyAvailable, sshCommand]);
-
-  const detailsMenuIndex = detailsSelectionIndex(detailsMenu, detailsActionId);
-
-  function openConnect(): void {
-    setConnectForm({ url: config?.apiUrl ?? "", token: config?.apiToken ?? "" });
-    setConnectField("url");
-    setConnectError(null);
-    setScreen({ kind: "connect" });
-  }
-
-  function openCreate(): void {
-    setCreateValues(CREATE_DEFAULT);
-    setCreateField(0);
-    setCreateError(null);
-    setScreen({ kind: "create" });
-  }
-
-  function openDetails(id: string): void {
-    setDetails(null);
-    setDetailsError(null);
-    setDetailsLoading(true);
-    setKeyAvailable(false);
-    setDetailsActionId("ssh");
-    setDetailsView("menu");
-    setScreen({ kind: "details", id });
-  }
-
-  function openPorts(id: string): void {
-    setPortSelected(0);
-    setPortForm(null);
-    setPortFormError(null);
-    setDetails(null);
-    setDetailsError(null);
-    setDetailsLoading(true);
-    setDetailsView("menu");
-    setScreen({ kind: "ports", id });
-  }
-
-  function moveDetailsSelection(delta: number): void {
-    const next = nextDetailsSelection(detailsMenu, detailsMenuIndex, delta);
-    if (next) {
-      setDetailsActionId(next);
+    try {
+      return buildSshArgv({
+        sandboxId: page.id,
+        host: sshHostFromApiUrl(config.apiUrl),
+        keyPath: getKeyPath(page.id),
+      });
+    } catch {
+      return null;
     }
-  }
+  }, [page, config]);
 
-  function triggerDetailsAction(id: DetailsActionId): void {
-    const item = detailsMenu.find((entry) => entry.id === id);
-    if (item) {
-      runDetailsAction(item);
-    }
-  }
-
-  function runDetailsAction(item: DetailsMenuItem): void {
-    if (!details) {
-      return;
-    }
-    if (!item.enabled) {
-      showToast("error", item.unavailableReason ?? "This action is unavailable.");
-      return;
-    }
-
-    switch (item.id) {
-      case "ssh":
-        void sshTo(details);
-        return;
+  const actions = useMemo<PageAction[]>(() => {
+    const ctx = {
+      status: pageDetails?.status ?? null,
+      keyAvailable: pageDetails !== null && keyAvailable,
+      sshCommandAvailable: gatewayHost !== null,
+    };
+    switch (page.kind) {
+      case "sandboxes":
+        return buildSandboxListActions();
+      case "sandbox":
+        return buildSandboxPageActions(ctx);
       case "ssh-details":
-        setDetailsView("ssh");
-        return;
+        return buildSshDetailsActions();
       case "ports":
-        openPorts(details.id);
+        return buildPortsPageActions({
+          hasSelectedPort: (pageDetails?.exposedPorts.length ?? 0) > 0,
+        });
+      case "open-port":
+        return buildOpenPortActions();
+      case "delete-sandbox":
+        return buildDeleteActions();
+      case "connect":
+        return buildConnectActions({ canGoBack: config !== null });
+      case "new-sandbox":
+        return buildNewSandboxActions();
+      case "ssh-terminal":
+        return [];
+    }
+  }, [page, pageDetails, keyAvailable, gatewayHost, config]);
+
+  const selectedActionIndex = actionIndex(actions, selectedActionId);
+  const sandboxGroups = useMemo(
+    () => buildSandboxPageGroups(actions, pageDetails?.exposedPorts ?? []),
+    [actions, pageDetails],
+  );
+
+  function actionTarget(): SandboxPageTarget | null {
+    if (page.kind === "sandboxes") {
+      return selectedSandbox ? targetForSandbox(selectedSandbox) : null;
+    }
+    return pageSandbox(page);
+  }
+
+  /**
+   * Opens a sandbox-scoped page. From the list we put the sandbox page
+   * underneath so breadcrumbs name the sandbox and esc lands on it.
+   */
+  function pushSandboxScoped(next: Page): void {
+    setSelectedActionId(null);
+    setTerminalStatus(null);
+    setStack((previous) => pushScopedPage(previous, next));
+  }
+
+  function runAction(id: ActionId): void {
+    switch (id) {
+      case "open": {
+        if (selected >= sandboxes.length) {
+          openCreate();
+          return;
+        }
+        const target = actionTarget();
+        if (target) {
+          push({ kind: "sandbox", ...target });
+        }
         return;
-      case "toggle":
-        void runDetailsLifecycle(details.status === "started" ? "stop" : "start");
+      }
+      case "start":
+        runLifecycle("start");
+        return;
+      case "stop":
+        runLifecycle("stop");
         return;
       case "restart":
-        void runDetailsLifecycle("restart");
+        runLifecycle("restart");
         return;
-      case "delete":
-        setConfirmDelete(details);
+      case "ssh":
+        void connectSsh();
+        return;
+      case "ssh-info": {
+        const target = actionTarget();
+        if (target) {
+          pushSandboxScoped({ kind: "ssh-details", ...target });
+        }
+        return;
+      }
+      case "ports": {
+        const target = actionTarget();
+        if (target) {
+          setPortSelected(0);
+          pushSandboxScoped({ kind: "ports", ...target });
+        }
+        return;
+      }
+      case "delete": {
+        const target = actionTarget();
+        if (target) {
+          pushSandboxScoped({ kind: "delete-sandbox", ...target });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "new":
+        openCreate();
+        return;
+      case "connect":
+        openConnect();
+        return;
+      case "open-port": {
+        const target = pageSandbox(page);
+        if (target) {
+          setPortForm({ field: "port", port: "", visibility: "public" });
+          setPortFormError(null);
+          pushSandboxScoped({ kind: "open-port", ...target });
+        }
+        return;
+      }
+      case "close-port":
+        void closeSelectedPort();
+        return;
+      case "copy-ssh":
+        void copySshCommand();
+        return;
+      case "confirm-delete":
+        void performDelete();
+        return;
+      case "submit":
+        submitCurrentForm();
+        return;
+      case "paste":
+        void pasteFromClipboard();
         return;
       case "back":
-        setScreen({ kind: "list" });
+        pop();
+        return;
+      case "quit":
+        quit();
         return;
     }
   }
 
-  async function runDetailsLifecycle(action: "start" | "stop" | "restart"): Promise<void> {
-    if (!api || !details) {
+  function runKeyAction(key: KeyEvent): boolean {
+    const action = findActionForKey(actions, actionKey(key));
+    if (!action) {
+      return false;
+    }
+    key.preventDefault();
+    if (!action.enabled) {
+      showToast("info", action.unavailableReason ?? "This action is unavailable.");
+      return true;
+    }
+    runAction(action.id);
+    return true;
+  }
+
+  function runLifecycle(action: "start" | "stop" | "restart"): void {
+    const target = actionTarget();
+    if (!api || !target) {
       return;
     }
-    const id = details.id;
-    const label = sandboxLabel(details);
+    const label = target.label;
     const message =
       action === "start"
         ? `Starting ${label}…`
@@ -487,22 +610,91 @@ export function App() {
           : `Restarted ${label}.`;
 
     setBusyMessage(message);
-    try {
-      if (action === "start") {
-        await api.startSandbox(id);
-      } else if (action === "stop") {
-        await api.stopSandbox(id);
-      } else {
-        await api.restartSandbox(id);
+    void (async () => {
+      try {
+        if (action === "start") {
+          await api.startSandbox(target.id);
+        } else if (action === "stop") {
+          await api.stopSandbox(target.id);
+        } else {
+          await api.restartSandbox(target.id);
+        }
+        await refreshList(false);
+        if (sandboxId === target.id) {
+          await loadDetails(target.id);
+        }
+        showToast("success", success);
+      } catch (error) {
+        showToast("error", describeError(error));
+      } finally {
+        setBusyMessage(null);
       }
-      await Promise.all([refreshList(false), loadDetails(id)]);
-      showToast("info", success);
+    })();
+  }
+
+  async function connectSsh(): Promise<void> {
+    const target = actionTarget();
+    if (!config || !target) {
+      return;
+    }
+    try {
+      if (!(await privateKeyExists(target.id))) {
+        showToast("error", NO_KEY_REASON);
+        return;
+      }
+      buildSshArgv({
+        sandboxId: target.id,
+        host: sshHostFromApiUrl(config.apiUrl),
+        keyPath: getKeyPath(target.id),
+      });
+      pushSandboxScoped({ kind: "ssh-terminal", ...target });
     } catch (error) {
       showToast("error", describeError(error));
-    } finally {
-      setBusyMessage(null);
     }
   }
+
+  function closeSshTerminal(): void {
+    const target = pageSandbox(page);
+    sshSession.current?.kill();
+    sshSession.current = null;
+    setTerminalStatus(null);
+    if (!target) {
+      return;
+    }
+    setStack((previous) => backFromTerminal(previous, target));
+    void refreshList(false);
+    void loadDetails(target.id);
+  }
+
+  const handleSshExit = useCallback(
+    (result: SshExitResult) => {
+      const top = currentPage(stackRef.current);
+      if (top.kind !== "ssh-terminal") {
+        return;
+      }
+      if (result.error) {
+        const detail = result.error.replace(/\.\s*$/, "");
+        setTerminalStatus(`Session ended: ${detail}. Press esc or ctrl+] to go back.`);
+        return;
+      }
+      if (result.status !== null && result.status !== 0) {
+        setTerminalStatus(
+          `Session ended: ssh exited with status ${result.status}. Press esc or ctrl+] to go back.`,
+        );
+        return;
+      }
+      const target: SandboxPageTarget = { id: top.id, label: top.label };
+      setTerminalStatus(null);
+      setStack((previous) => backFromTerminal(previous, target));
+      void refreshList(false);
+      void loadDetails(target.id);
+    },
+    [refreshList, loadDetails],
+  );
+
+  const handleSessionChange = useCallback((session: SshSessionHandle | null) => {
+    sshSession.current = session;
+  }, []);
 
   async function copySshCommand(): Promise<void> {
     if (!sshCommand) {
@@ -511,9 +703,82 @@ export function App() {
     }
     const copied = await writeClipboard(sshCommand);
     showToast(
-      copied ? "info" : "error",
+      copied ? "success" : "error",
       copied ? "Copied SSH command" : "Couldn't copy the SSH command. Use your terminal's copy.",
     );
+  }
+
+  function openConnect(): void {
+    setConnectForm({ url: config?.apiUrl ?? "", token: config?.apiToken ?? "" });
+    setConnectField("url");
+    setConnectError(null);
+    push({ kind: "connect" });
+  }
+
+  function openCreate(): void {
+    setCreateValues(CREATE_DEFAULT);
+    setCreateFocus("image");
+    setCreateError(null);
+    setImageMenuOpen(false);
+    setImageMenuIndex(0);
+    push({ kind: "new-sandbox" });
+  }
+
+  function openImageMenu(): void {
+    setImageMenuIndex(imageOptionIndex(createValues));
+    setImageMenuOpen(true);
+  }
+
+  function chooseImageOption(index: number): void {
+    const option = IMAGE_OPTIONS[index];
+    if (!option) {
+      return;
+    }
+    setCreateValues((previous) => selectImageOption(previous, option));
+    setImageMenuOpen(false);
+  }
+
+  function submitCurrentForm(): void {
+    switch (page.kind) {
+      case "connect":
+        if (connectField === "url") {
+          setConnectField("token");
+        } else {
+          void submitConnect();
+        }
+        return;
+      case "new-sandbox":
+        void submitCreate();
+        return;
+      case "open-port":
+        if (portForm?.field === "port") {
+          setPortForm((previous) => (previous ? { ...previous, field: "visibility" } : previous));
+        } else {
+          void submitPort();
+        }
+        return;
+      default:
+        return;
+    }
+  }
+
+  async function pasteFromClipboard(): Promise<void> {
+    if (clipboardBusy.current) {
+      return;
+    }
+    clipboardBusy.current = true;
+    try {
+      const text = await readClipboard();
+      if (text === null) {
+        showToast("error", CLIPBOARD_ERROR);
+        return;
+      }
+      insertPastedText(text);
+    } catch {
+      showToast("error", CLIPBOARD_ERROR);
+    } finally {
+      clipboardBusy.current = false;
+    }
   }
 
   async function submitConnect(): Promise<void> {
@@ -552,8 +817,9 @@ export function App() {
       setSelected(0);
       setListError(null);
       setConnectForm({ url: "", token: "" });
-      setScreen({ kind: "list" });
-      showToast("info", `Connected to AerolVM ${health.version}.`);
+      setSelectedActionId(null);
+      setStack([ROOT_PAGE]);
+      showToast("success", `Connected to AerolVM ${health.version}.`);
     } catch (error) {
       setConnectError(describeError(error));
     } finally {
@@ -567,36 +833,48 @@ export function App() {
     }
     setCreateError(null);
 
-    const image = createValues.image.trim();
-    if (!image) {
-      setCreateError("Image is required.");
-      return;
-    }
-
-    const input: CreateSandboxInput = { image };
+    const input: CreateSandboxInput = {};
     try {
       const name = createValues.name.trim();
       if (name) {
         input.name = name;
       }
-      const cpu = parseOptionalNumber(createValues.cpu, "CPU", false);
-      const memoryMB = parseOptionalNumber(createValues.memoryMB, "Memory MB", true);
-      const diskGB = parseOptionalNumber(createValues.diskGB, "Disk GB", true);
-      if (cpu !== undefined) {
-        input.cpu = cpu;
+
+      const size = createSizeInput(createValues);
+      if (size.cpu !== undefined) {
+        input.cpu = size.cpu;
       }
-      if (memoryMB !== undefined) {
-        input.memoryMB = memoryMB;
+      if (size.memoryMB !== undefined) {
+        input.memoryMB = size.memoryMB;
       }
-      if (diskGB !== undefined) {
-        input.diskGB = diskGB;
+      if (size.diskGB !== undefined) {
+        input.diskGB = size.diskGB;
+      }
+
+      switch (createValues.imageSource) {
+        case "dockerfile":
+          input.dockerfile = await readDockerfileContents(createValues);
+          break;
+        case "custom": {
+          const image = createValues.customImage.trim();
+          if (!image) {
+            throw new Error("Image is required.");
+          }
+          input.image = image;
+          break;
+        }
+        case "preset":
+          input.image = createValues.image;
+          break;
       }
     } catch (error) {
       setCreateError(describeError(error));
       return;
     }
 
-    setBusyMessage("Creating sandbox…");
+    setBusyMessage(
+      input.dockerfile === undefined ? "Creating sandbox…" : "Building image and creating sandbox…",
+    );
     try {
       const created = await api.createSandbox(input);
       let warning: string | null = null;
@@ -616,10 +894,13 @@ export function App() {
         setSelected(index);
       }
       setCreateValues(CREATE_DEFAULT);
-      setCreateField(0);
-      setScreen({ kind: "list" });
+      setCreateFocus("image");
+      setImageMenuOpen(false);
+      setImageMenuIndex(0);
+      setSelectedActionId(null);
+      setStack([ROOT_PAGE]);
       showToast(
-        warning ? "error" : "info",
+        warning ? "warning" : "success",
         warning
           ? `Created ${sandboxLabel(created.sandbox)}, but ${warning}.`
           : `Created ${sandboxLabel(created.sandbox)}.`,
@@ -631,91 +912,28 @@ export function App() {
     }
   }
 
-  async function runSandboxAction(
-    message: string,
-    action: () => Promise<unknown>,
-    success: string,
-  ): Promise<void> {
-    setBusyMessage(message);
-    try {
-      await action();
-      await refreshList(false);
-      showToast("info", success);
-    } catch (error) {
-      showToast("error", describeError(error));
-    } finally {
-      setBusyMessage(null);
-    }
-  }
-
-  function startSelected(): void {
-    const sandbox = selectedSandbox;
-    if (!sandbox || !api) {
-      return;
-    }
-    if (sandbox.status === "started") {
-      showToast("info", `${sandboxLabel(sandbox)} is already running.`);
-      return;
-    }
-    void runSandboxAction(
-      `Starting ${sandboxLabel(sandbox)}…`,
-      () => api.startSandbox(sandbox.id),
-      `Started ${sandboxLabel(sandbox)}.`,
-    );
-  }
-
-  function stopSelected(): void {
-    const sandbox = selectedSandbox;
-    if (!sandbox || !api) {
-      return;
-    }
-    if (sandbox.status === "stopped" || sandbox.status === "passivated") {
-      showToast("info", `${sandboxLabel(sandbox)} is already stopped.`);
-      return;
-    }
-    void runSandboxAction(
-      `Stopping ${sandboxLabel(sandbox)}…`,
-      () => api.stopSandbox(sandbox.id),
-      `Stopped ${sandboxLabel(sandbox)}.`,
-    );
-  }
-
-  function restartSelected(): void {
-    const sandbox = selectedSandbox;
-    if (!sandbox || !api) {
-      return;
-    }
-    void runSandboxAction(
-      `Restarting ${sandboxLabel(sandbox)}…`,
-      () => api.restartSandbox(sandbox.id),
-      `Restarted ${sandboxLabel(sandbox)}.`,
-    );
-  }
-
   async function performDelete(): Promise<void> {
-    const sandbox = confirmDelete;
-    setConfirmDelete(null);
-    if (!sandbox || !api) {
+    const target = page.kind === "delete-sandbox" ? pageSandbox(page) : null;
+    if (!target || !api) {
       return;
     }
 
-    setBusyMessage(`Deleting ${sandboxLabel(sandbox)}…`);
+    setBusyMessage(`Deleting ${target.label}…`);
     try {
-      await api.destroySandbox(sandbox.id);
+      await api.destroySandbox(target.id);
       let warning: string | null = null;
       try {
-        await deletePrivateKey(sandbox.id);
+        await deletePrivateKey(target.id);
       } catch (error) {
         warning = `its stored SSH key could not be deleted: ${describeError(error)}`;
       }
-      setScreen({ kind: "list" });
-      setDetailsView("menu");
+      setDetails(null);
+      setSelectedActionId(null);
+      setStack([ROOT_PAGE]);
       await refreshList(false);
       showToast(
-        warning ? "error" : "info",
-        warning
-          ? `Deleted ${sandboxLabel(sandbox)}, but ${warning}.`
-          : `Deleted ${sandboxLabel(sandbox)}.`,
+        warning ? "warning" : "success",
+        warning ? `Deleted ${target.label}, but ${warning}.` : `Deleted ${target.label}.`,
       );
     } catch (error) {
       showToast("error", describeError(error));
@@ -724,74 +942,15 @@ export function App() {
     }
   }
 
-  async function sshTo(sandbox: SandboxInfo): Promise<void> {
-    if (!config || busyMessage) {
-      return;
-    }
-
-    let argv: string[];
-    try {
-      const keyPath = getKeyPath(sandbox.id);
-      if (!(await privateKeyExists(sandbox.id))) {
-        showToast(
-          "error",
-          "No private key is stored for this sandbox. The key is only available for sandboxes created by lewdev.",
-        );
-        return;
-      }
-      argv = buildSshArgv({
-        sandboxId: sandbox.id,
-        host: sshHostFromApiUrl(config.apiUrl),
-        keyPath,
-      });
-    } catch (error) {
-      showToast("error", describeError(error));
-      return;
-    }
-
-    setBusyMessage(`Connecting to ${sandboxLabel(sandbox)} over SSH…`);
-    let suspended = false;
-    let sshExit = 0;
-    let failure: string | null = null;
-
-    try {
-      await renderer.suspend();
-      suspended = true;
-      const child = Bun.spawn(argv, {
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      sshExit = await child.exited;
-    } catch (error) {
-      failure = describeError(error);
-    } finally {
-      if (suspended) {
-        try {
-          await renderer.resume();
-        } catch (error) {
-          failure = `Could not restore the TUI: ${describeError(error)}`;
-        }
-      }
-      setBusyMessage(null);
-    }
-
-    if (failure) {
-      showToast("error", failure);
-    } else if (sshExit !== 0) {
-      showToast("error", `ssh exited with status ${sshExit}.`);
-    }
-    void refreshList(false);
-    if (sandbox.id === details?.id) {
-      void loadDetails(sandbox.id);
-    }
-  }
-
   async function submitPort(): Promise<void> {
-    if (!api || screen.kind !== "ports" || !portForm || busyMessage) {
+    if (!api || page.kind !== "open-port" || busyMessage) {
       return;
     }
-    const port = Number(portForm.port.trim());
+    const form = portForm;
+    if (!form) {
+      return;
+    }
+    const port = Number(form.port.trim());
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       setPortFormError("Enter a port number from 1 to 65535.");
       return;
@@ -800,10 +959,12 @@ export function App() {
     setPortFormError(null);
     setBusyMessage(`Opening port ${port}…`);
     try {
-      const opened = await api.openPort(screen.id, port, portForm.visibility);
+      const opened = await api.openPort(page.id, port, form.visibility);
       setPortForm(null);
-      await loadDetails(screen.id);
-      showToast("info", `Port ${port} opened: ${opened.url}`);
+      await loadDetails(page.id);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Port ${port} opened: ${opened.url}`);
     } catch (error) {
       setPortFormError(describeError(error));
     } finally {
@@ -812,19 +973,19 @@ export function App() {
   }
 
   async function closeSelectedPort(): Promise<void> {
-    if (!api || screen.kind !== "ports" || !details) {
+    if (!api || page.kind !== "ports" || !pageDetails) {
       return;
     }
-    const port = details.exposedPorts[portSelected];
+    const port = pageDetails.exposedPorts[portSelected];
     if (!port) {
       return;
     }
 
     setBusyMessage(`Closing port ${port.port}…`);
     try {
-      await api.closePort(screen.id, port.port);
-      await loadDetails(screen.id);
-      showToast("info", `Port ${port.port} closed.`);
+      await api.closePort(pageDetails.id, port.port);
+      await loadDetails(pageDetails.id);
+      showToast("success", `Port ${port.port} closed.`);
     } catch (error) {
       showToast("error", describeError(error));
     } finally {
@@ -832,30 +993,86 @@ export function App() {
     }
   }
 
+  function moveAction(delta: number): void {
+    const next = nextActionId(actions, selectedActionIndex, delta);
+    if (next) {
+      setSelectedActionId(next);
+    }
+  }
+
   function insertPastedText(raw: string): void {
+    if (page.kind === "new-sandbox" && createFocus === "image-dockerfile" && /[\r\n]/.test(raw)) {
+      setCreateValues((previous) => ({
+        ...previous,
+        dockerfilePath: "",
+        dockerfileContents: raw.replace(/\r\n/g, "\n"),
+      }));
+      return;
+    }
+
     const text = raw.replace(/[\r\n\t]+/g, " ");
     if (!text) {
       return;
     }
 
-    if (screen.kind === "connect") {
+    if (page.kind === "connect") {
       setConnectForm((previous) => ({
         ...previous,
         [connectField]: appendText(previous[connectField], text),
       }));
       return;
     }
-    if (screen.kind === "create") {
-      const field = CREATE_FIELDS[createField];
-      if (field) {
-        setCreateValues((previous) => ({
-          ...previous,
-          [field.key]: appendText(previous[field.key], text),
-        }));
+    if (page.kind === "new-sandbox") {
+      switch (createFocus) {
+        case "image":
+          return;
+        case "image-ref":
+          setCreateValues((previous) => ({
+            ...previous,
+            customImage: appendText(previous.customImage, text),
+          }));
+          return;
+        case "image-dockerfile":
+          if (createValues.dockerfileContents) {
+            return;
+          }
+          setCreateValues((previous) => ({
+            ...previous,
+            dockerfilePath: appendText(previous.dockerfilePath, text),
+          }));
+          return;
+        case "size":
+          return;
+        case "size-cpu":
+        case "size-memory": {
+          const key = createFocus === "size-cpu" ? "customCpu" : "customMemoryGB";
+          const merged = `${createValues[key]}${text}`.replace(/[^\d.]/g, "");
+          const [whole = "", ...rest] = merged.split(".");
+          setCreateValues((previous) => ({
+            ...previous,
+            [key]: rest.length > 0 ? `${whole}.${rest.join("")}` : whole,
+          }));
+          return;
+        }
+        case "size-disk": {
+          const digits = text.replace(/\D/g, "");
+          if (digits) {
+            setCreateValues((previous) => ({
+              ...previous,
+              customDiskGB: appendText(previous.customDiskGB, digits),
+            }));
+          }
+          return;
+        }
+        case "name":
+          setCreateValues((previous) => ({
+            ...previous,
+            name: appendText(previous.name, text),
+          }));
+          return;
       }
-      return;
     }
-    if (screen.kind === "ports" && portForm?.field === "port") {
+    if (page.kind === "open-port" && portForm?.field === "port") {
       const digits = text.replace(/\D/g, "");
       if (digits) {
         setPortForm((previous) =>
@@ -865,9 +1082,23 @@ export function App() {
     }
   }
 
-  insertPasteRef.current = insertPastedText;
-
   useKeyboard((key) => {
+    if (page.kind === "ssh-terminal") {
+      const pressed = actionKey(key);
+      const ended = terminalStatus !== null;
+      if (pressed === "ctrl+]" || (ended && pressed === "esc")) {
+        key.preventDefault();
+        closeSshTerminal();
+        return;
+      }
+      if (ended) {
+        // The session is over; keep its last output on screen and swallow keys.
+        key.preventDefault();
+        return;
+      }
+      // Every other key belongs to the remote shell via the focused emulator.
+      return;
+    }
     if (key.ctrl && key.name === "c") {
       quit();
       return;
@@ -876,52 +1107,83 @@ export function App() {
       return;
     }
 
-    if (key.ctrl && key.name.toLowerCase() === "v") {
-      const textFieldActive =
-        screen.kind === "connect" ||
-        (screen.kind === "create" && createField < CREATE_FIELDS.length) ||
-        (screen.kind === "ports" && portForm?.field === "port");
-      if (!textFieldActive || clipboardBusy.current) {
+    if (page.kind === "sandboxes") {
+      if (key.name === "down" || actionKey(key) === "j") {
+        setSelected((previous) => Math.min(previous + 1, sandboxes.length));
         return;
       }
+      if (key.name === "up" || actionKey(key) === "k") {
+        setSelected((previous) => Math.max(0, previous - 1));
+        return;
+      }
+    }
 
-      key.preventDefault();
-      clipboardBusy.current = true;
-      void readClipboard()
-        .then((text) => {
-          if (text === null) {
-            showToast(
-              "error",
-              "Couldn't read the clipboard. Use your terminal's paste (usually Ctrl+Shift+V).",
-            );
-            return;
-          }
-          insertPasteRef.current(text);
-        })
-        .catch(() => {
-          showToast(
-            "error",
-            "Couldn't read the clipboard. Use your terminal's paste (usually Ctrl+Shift+V).",
-          );
-        })
-        .finally(() => {
-          clipboardBusy.current = false;
-        });
+    if (page.kind === "ports") {
+      const count = pageDetails?.exposedPorts.length ?? 0;
+      if (key.name === "down" || actionKey(key) === "j") {
+        setPortSelected((previous) => Math.min(previous + 1, Math.max(0, count - 1)));
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        setPortSelected((previous) => Math.max(0, previous - 1));
+        return;
+      }
+    }
+
+    if (page.kind === "sandbox" || page.kind === "ssh-details" || page.kind === "delete-sandbox") {
+      if (key.name === "down" || actionKey(key) === "j") {
+        moveAction(1);
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        moveAction(-1);
+        return;
+      }
+      if (key.name === "return") {
+        const item = actions[selectedActionIndex];
+        if (!item) {
+          return;
+        }
+        if (!item.enabled) {
+          showToast("info", item.unavailableReason ?? "This action is unavailable.");
+          return;
+        }
+        runAction(item.id);
+        return;
+      }
+    }
+
+    if (page.kind === "new-sandbox") {
+      if (imageMenuOpen) {
+        if (key.name === "down" || actionKey(key) === "j") {
+          setImageMenuIndex((index) => Math.min(index + 1, IMAGE_OPTIONS.length - 1));
+          return;
+        }
+        if (key.name === "up" || actionKey(key) === "k") {
+          setImageMenuIndex((index) => Math.max(0, index - 1));
+          return;
+        }
+        if (key.name === "return" || key.name === "space") {
+          chooseImageOption(imageMenuIndex);
+          return;
+        }
+        if (key.name === "escape") {
+          setImageMenuOpen(false);
+          return;
+        }
+        return;
+      }
+      if (createFocus === "image" && (key.name === "return" || key.name === "space")) {
+        openImageMenu();
+        return;
+      }
+    }
+
+    if (runKeyAction(key)) {
       return;
     }
 
-    if (confirmDelete) {
-      if (shortcut(key, "y") === "plain" || key.name === "return") {
-        void performDelete();
-        return;
-      }
-      if (shortcut(key, "n") === "plain" || key.name === "escape") {
-        setConfirmDelete(null);
-      }
-      return;
-    }
-
-    if (screen.kind === "connect") {
+    if (page.kind === "connect") {
       if (key.name === "tab") {
         setConnectField((previous) => (previous === "url" ? "token" : "url"));
         return;
@@ -932,18 +1194,6 @@ export function App() {
       }
       if (key.name === "up") {
         setConnectField("url");
-        return;
-      }
-      if (key.name === "return") {
-        if (connectField === "url") {
-          setConnectField("token");
-        } else {
-          void submitConnect();
-        }
-        return;
-      }
-      if (key.name === "escape" && config) {
-        setScreen({ kind: "list" });
         return;
       }
       if (key.name === "backspace" || key.name === "delete") {
@@ -963,346 +1213,215 @@ export function App() {
       return;
     }
 
-    if (screen.kind === "create") {
-      if (key.name === "escape") {
-        setScreen({ kind: "list" });
-        setCreateError(null);
+    if (page.kind === "new-sandbox") {
+      if (key.name === "tab" || key.name === "backtab" || (key.name === "tab" && key.shift)) {
+        const delta = key.name === "backtab" || key.shift ? -1 : 1;
+        setCreateFocus((current) => nextCreateFocus(createValues, current, delta));
         return;
       }
-      const field = CREATE_FIELDS[createField];
-      const previousField =
-        key.name === "up" || key.name === "backtab" || (key.name === "tab" && key.shift);
-      if (previousField) {
-        setCreateField((index) => (index - 1 + CREATE_FIELDS.length) % CREATE_FIELDS.length);
-        return;
-      }
-      if (key.name === "tab" || key.name === "down") {
-        setCreateField((index) => (index + 1) % CREATE_FIELDS.length);
-        return;
-      }
-      if (key.name === "return") {
-        void submitCreate();
-        return;
-      }
-      if ((key.name === "backspace" || key.name === "delete") && field) {
-        setCreateValues((previous) => ({
-          ...previous,
-          [field.key]: removeLastChar(previous[field.key]),
-        }));
-        return;
-      }
-      const char = printableChar(key);
-      if (char && field) {
-        setCreateValues((previous) => ({
-          ...previous,
-          [field.key]: appendText(previous[field.key], char),
-        }));
-      }
-      return;
-    }
 
-    if (screen.kind === "details") {
-      if (detailsView === "ssh") {
-        if (key.name === "escape") {
-          setDetailsView("menu");
-          return;
-        }
-        if (shortcut(key, "y") === "plain") {
-          void copySshCommand();
+      if (createFocus === "size") {
+        if (key.name === "left" || key.name === "right") {
+          setCreateValues((previous) => ({
+            ...previous,
+            size: moveSize(previous.size, key.name === "left" ? -1 : 1),
+          }));
         }
         return;
       }
 
-      if (key.name === "escape") {
-        setScreen({ kind: "list" });
+      if (createFocus === "image") {
         return;
       }
-      if (key.name === "down" || shortcut(key, "j") === "plain") {
-        moveDetailsSelection(1);
-        return;
-      }
-      if (key.name === "up" || shortcut(key, "k") === "plain") {
-        moveDetailsSelection(-1);
-        return;
-      }
-      if (key.name === "return") {
-        const item = detailsMenu[detailsMenuIndex];
-        if (item) {
-          runDetailsAction(item);
-        }
-        return;
-      }
-      if (shortcut(key, "s") === "plain") {
-        if (details?.status === "started") {
-          showToast("info", "The sandbox is already running.");
-          return;
-        }
-        triggerDetailsAction("toggle");
-        return;
-      }
-      if (shortcut(key, "s") === "shift") {
-        triggerDetailsAction("ssh");
-        return;
-      }
-      if (shortcut(key, "x") === "plain") {
-        if (details && details.status !== "started") {
-          showToast(
-            "info",
-            details.status === "stopped" || details.status === "passivated"
-              ? "The sandbox is already stopped."
-              : "The sandbox is not running.",
-          );
-          return;
-        }
-        triggerDetailsAction("toggle");
-        return;
-      }
-      if (shortcut(key, "p") === "plain") {
-        triggerDetailsAction("ports");
-        return;
-      }
-      if (shortcut(key, "r") === "shift") {
-        triggerDetailsAction("restart");
-        return;
-      }
-      if (shortcut(key, "d") === "plain") {
-        triggerDetailsAction("delete");
-        return;
-      }
-      if (shortcut(key, "v") === "plain") {
-        triggerDetailsAction("ssh-details");
-      }
-      return;
-    }
 
-    if (screen.kind === "ports") {
-      if (portForm) {
-        if (key.name === "escape") {
-          setPortForm(null);
-          setPortFormError(null);
+      if (createFocus === "image-ref") {
+        if (key.name === "backspace" || key.name === "delete") {
+          setCreateValues((previous) => ({
+            ...previous,
+            customImage: removeLastChar(previous.customImage),
+          }));
           return;
         }
-        if (key.name === "tab" || key.name === "down" || key.name === "up") {
-          setPortForm((previous) =>
-            previous
-              ? { ...previous, field: previous.field === "port" ? "visibility" : "port" }
-              : previous,
-          );
-          return;
+        const char = printableChar(key);
+        if (char) {
+          setCreateValues((previous) => ({
+            ...previous,
+            customImage: appendText(previous.customImage, char),
+          }));
         }
-        if (
-          portForm.field === "visibility" &&
-          (key.name === "left" || key.name === "right" || key.name === "space")
-        ) {
-          setPortForm((previous) =>
-            previous
-              ? {
-                  ...previous,
-                  visibility: previous.visibility === "public" ? "token" : "public",
-                }
-              : previous,
-          );
-          return;
-        }
-        if (key.name === "return") {
-          if (portForm.field === "port") {
-            setPortForm((previous) => (previous ? { ...previous, field: "visibility" } : previous));
-          } else {
-            void submitPort();
+        return;
+      }
+
+      if (createFocus === "image-dockerfile") {
+        if (createValues.dockerfileContents) {
+          if (key.name === "backspace" || key.name === "delete") {
+            setCreateValues((previous) => ({ ...previous, dockerfileContents: "" }));
           }
           return;
         }
         if (key.name === "backspace" || key.name === "delete") {
-          setPortForm((previous) =>
-            previous ? { ...previous, port: removeLastChar(previous.port) } : previous,
-          );
+          setCreateValues((previous) => ({
+            ...previous,
+            dockerfilePath: removeLastChar(previous.dockerfilePath),
+          }));
           return;
         }
         const char = printableChar(key);
-        if (char && /^\d$/.test(char)) {
-          setPortForm((previous) =>
-            previous ? { ...previous, port: appendText(previous.port, char) } : previous,
-          );
+        if (char) {
+          setCreateValues((previous) => ({
+            ...previous,
+            dockerfilePath: appendText(previous.dockerfilePath, char),
+          }));
         }
         return;
       }
 
-      if (key.name === "escape") {
-        setScreen({ kind: "details", id: screen.id });
+      const field =
+        createFocus === "size-cpu"
+          ? "customCpu"
+          : createFocus === "size-memory"
+            ? "customMemoryGB"
+            : createFocus === "size-disk"
+              ? "customDiskGB"
+              : createFocus === "name"
+                ? "name"
+                : null;
+      if (!field) {
         return;
       }
-      if (shortcut(key, "q")) {
-        quit();
+
+      if (key.name === "backspace" || key.name === "delete") {
+        setCreateValues((previous) => ({
+          ...previous,
+          [field]: removeLastChar(previous[field]),
+        }));
         return;
       }
-      if (key.name === "down" || shortcut(key, "j") === "plain") {
-        setPortSelected((previous) =>
-          details ? Math.min(previous + 1, Math.max(0, details.exposedPorts.length - 1)) : previous,
-        );
+
+      const char = printableChar(key);
+      if (!char) {
         return;
       }
-      if (key.name === "up" || shortcut(key, "k") === "plain") {
-        setPortSelected((previous) => Math.max(0, previous - 1));
-        return;
-      }
-      if (shortcut(key, "o") === "plain") {
-        setPortForm({ field: "port", port: "", visibility: "public" });
-        setPortFormError(null);
-        return;
-      }
-      if (shortcut(key, "x") === "plain") {
-        void closeSelectedPort();
-        return;
-      }
-      if (shortcut(key, "c") === "plain") {
-        openConnect();
+      if (field === "customCpu" || field === "customMemoryGB") {
+        const value = createValues[field];
+        if (/^\d$/.test(char) || (char === "." && !value.includes("."))) {
+          setCreateValues((previous) => ({ ...previous, [field]: appendText(value, char) }));
+        }
+      } else if (field === "customDiskGB") {
+        if (/^\d$/.test(char)) {
+          setCreateValues((previous) => ({
+            ...previous,
+            customDiskGB: appendText(previous.customDiskGB, char),
+          }));
+        }
+      } else {
+        setCreateValues((previous) => ({ ...previous, name: appendText(previous.name, char) }));
       }
       return;
     }
 
-    if (shortcut(key, "q")) {
-      quit();
-      return;
-    }
-    if (key.name === "down" || shortcut(key, "j") === "plain") {
-      setSelected((previous) => Math.min(previous + 1, Math.max(0, sandboxes.length - 1)));
-      return;
-    }
-    if (key.name === "up" || shortcut(key, "k") === "plain") {
-      setSelected((previous) => Math.max(0, previous - 1));
-      return;
-    }
-    if (shortcut(key, "n") === "plain") {
-      openCreate();
-      return;
-    }
-    if (shortcut(key, "s") === "plain") {
-      startSelected();
-      return;
-    }
-    if (shortcut(key, "s") === "shift") {
-      if (selectedSandbox) {
-        void sshTo(selectedSandbox);
+    if (page.kind === "open-port") {
+      if (key.name === "tab" || key.name === "down" || key.name === "up") {
+        setPortForm((previous) =>
+          previous
+            ? { ...previous, field: previous.field === "port" ? "visibility" : "port" }
+            : previous,
+        );
+        return;
       }
-      return;
-    }
-    if (shortcut(key, "x") === "plain") {
-      stopSelected();
-      return;
-    }
-    if (shortcut(key, "r") === "shift") {
-      restartSelected();
-      return;
-    }
-    if (shortcut(key, "d") === "plain") {
-      if (selectedSandbox) {
-        setConfirmDelete(selectedSandbox);
+      if (
+        portForm?.field === "visibility" &&
+        (key.name === "left" || key.name === "right" || key.name === "space")
+      ) {
+        setPortForm((previous) =>
+          previous
+            ? {
+                ...previous,
+                visibility: previous.visibility === "public" ? "token" : "public",
+              }
+            : previous,
+        );
+        return;
       }
-      return;
-    }
-    if (key.name === "return") {
-      if (selectedSandbox) {
-        openDetails(selectedSandbox.id);
+      if (key.name === "backspace" || key.name === "delete") {
+        setPortForm((previous) =>
+          previous ? { ...previous, port: removeLastChar(previous.port) } : previous,
+        );
+        return;
       }
-      return;
-    }
-    if (shortcut(key, "p") === "plain") {
-      if (selectedSandbox) {
-        openPorts(selectedSandbox.id);
+      const char = printableChar(key);
+      if (char && /^\d$/.test(char)) {
+        setPortForm((previous) =>
+          previous ? { ...previous, port: appendText(previous.port, char) } : previous,
+        );
       }
-      return;
-    }
-    if (shortcut(key, "c") === "plain") {
-      openConnect();
     }
   });
 
   usePaste((event) => {
-    if (booting || busyMessage || connectBusy) {
+    if (booting || page.kind === "ssh-terminal") {
+      return;
+    }
+    event.preventDefault();
+    if (busyMessage || connectBusy) {
       return;
     }
     insertPastedText(decodePasteBytes(event.bytes));
   });
 
-  const hints = useMemo<KeyHint[]>(() => {
+  const hints = useMemo<ActionHint[]>(() => {
     if (booting) {
       return [];
     }
-    if (confirmDelete) {
-      return [
-        ["y", "delete"],
-        ["n / esc", "cancel"],
-      ];
+    if (page.kind === "ssh-terminal") {
+      return terminalStatus
+        ? [
+            ["esc", "back"],
+            ["ctrl+]", "back"],
+          ]
+        : [["ctrl+]", "close session"]];
     }
-    if (screen.kind === "connect") {
-      const items: KeyHint[] = [
-        ["tab", "next field"],
-        ["enter", "verify & save"],
-        ["ctrl+v", "paste"],
-        ["ctrl+c", "quit"],
-      ];
-      if (config) {
-        items.splice(2, 0, ["esc", "back"]);
-      }
-      return items;
+    if (page.kind === "sandboxes") {
+      return actionHints(actions, { extra: [["↑/↓", "move"]] });
     }
-    if (screen.kind === "create") {
-      return [
-        ["tab", "next field"],
-        ["enter", "create"],
-        ["esc", "back"],
-      ];
+    if (page.kind === "ports") {
+      return actionHints(actions, { extra: [["↑/↓", "move"]] });
     }
-    if (screen.kind === "details") {
-      if (detailsView === "ssh") {
+    if (page.kind === "connect") {
+      return actionHints(actions, { extra: [["tab", "next field"]] });
+    }
+    if (page.kind === "new-sandbox") {
+      if (imageMenuOpen) {
         return [
-          ["esc", "back"],
-          ["y", "copy ssh"],
+          ["↑/↓", "move"],
+          ["enter", "pick"],
+          ["esc", "close"],
         ];
       }
-      return [
-        ["↑/↓", "move"],
-        ["enter", "run"],
-        ["s/x", "start / stop"],
-        ["R", "restart"],
-        ["S", "ssh"],
-        ["v", "ssh info"],
-        ["p", "ports"],
-        ["d", "delete"],
-        ["esc", "back"],
-      ];
+      const extra: ActionHint[] = [["tab", "next field"]];
+      if (createFocus === "image") {
+        extra.push(["enter", "open list"], ["space", "open list"]);
+      }
+      if (createFocus === "size") {
+        extra.push(["←/→", "preset"]);
+      }
+      const visibleActions =
+        createFocus === "image" ? actions.filter((action) => action.id !== "submit") : actions;
+      return actionHints(visibleActions, { extra });
     }
-    if (screen.kind === "ports") {
-      if (portForm) {
-        return [
+    if (page.kind === "open-port") {
+      return actionHints(actions, {
+        extra: [
           ["tab", "next field"],
           ["←/→", "visibility"],
-          ["enter", "open port"],
-          ["esc", "cancel"],
-        ];
-      }
-      return [
-        ["↑/↓", "move"],
-        ["o", "open port"],
-        ["x", "close port"],
-        ["esc", "back"],
-        ["q", "quit"],
-      ];
+        ],
+      });
     }
-    return [
-      ["↑/↓", "move"],
-      ["n", "new"],
-      ["s", "start"],
-      ["x", "stop"],
-      ["R", "restart"],
-      ["d", "delete"],
-      ["enter", "details"],
-      ["S", "ssh"],
-      ["p", "ports"],
-      ["c", "connect"],
-      ["q", "quit"],
-    ];
-  }, [booting, screen, config, confirmDelete, portForm, detailsView]);
+    return actionHints(actions, {
+      selection:
+        page.kind === "sandbox" || page.kind === "ssh-details" || page.kind === "delete-sandbox",
+    });
+  }, [booting, page.kind, actions, terminalStatus, imageMenuOpen, createFocus]);
 
   if (booting) {
     return (
@@ -1320,69 +1439,113 @@ export function App() {
   }
 
   let content: ReactNode;
-  if (confirmDelete) {
-    content = (
-      <ConfirmDialog title="Delete sandbox">
-        <text fg={colors.text}>
-          Delete <span fg={colors.accent}>{sandboxLabel(confirmDelete)}</span>?
-        </text>
-        <text fg={colors.muted}>{confirmDelete.id}</text>
-        <text fg={colors.warning} wrapMode="word">
-          This also removes the private key lewdev stored for it. The action cannot be undone.
-        </text>
-      </ConfirmDialog>
-    );
-  } else if (screen.kind === "connect") {
-    content = (
-      <ConnectScreen
-        form={connectForm}
-        activeField={connectField}
-        busy={connectBusy}
-        error={connectError}
-        configPath={configPath}
-      />
-    );
-  } else if (screen.kind === "create") {
-    content = <CreateScreen values={createValues} activeIndex={createField} error={createError} />;
-  } else if (screen.kind === "details") {
-    content =
-      detailsView === "ssh" && details ? (
+  switch (page.kind) {
+    case "connect":
+      content = (
+        <ConnectScreen
+          form={connectForm}
+          activeField={connectField}
+          busy={connectBusy}
+          error={connectError}
+          configPath={configPath}
+        />
+      );
+      break;
+    case "new-sandbox":
+      content = (
+        <CreateScreen
+          values={createValues}
+          focus={createFocus}
+          imageMenuOpen={imageMenuOpen}
+          imageMenuIndex={imageMenuIndex}
+          error={createError}
+        />
+      );
+      break;
+    case "sandbox":
+      content = (
+        <DetailsScreen
+          details={pageDetails}
+          loading={detailsLoading}
+          error={detailsError}
+          groups={sandboxGroups}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "ssh-details":
+      content = pageDetails ? (
         <SshDetailsScreen
-          details={details}
+          details={pageDetails}
           gatewayHost={gatewayHost}
           keyPath={detailsKeyPath}
           keyAvailable={keyAvailable}
-          sshCommand={sshCommand}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
         />
       ) : (
-        <DetailsScreen
-          details={details}
+        <LoadingPanel
           loading={detailsLoading}
           error={detailsError}
-          menu={detailsMenu}
-          selectedIndex={detailsMenuIndex}
+          title="SSH details"
+          fallback="SSH details are unavailable."
         />
       );
-  } else if (screen.kind === "ports") {
-    content = (
-      <PortsScreen
-        details={details}
-        selected={portSelected}
-        loading={detailsLoading}
-        error={detailsError}
-        form={portForm}
-        formError={portFormError}
-      />
-    );
-  } else {
-    content = (
-      <ListScreen
-        sandboxes={sandboxes}
-        selected={selected}
-        loading={listLoading}
-        error={listError}
-      />
-    );
+      break;
+    case "ports":
+      content = (
+        <PortsScreen
+          details={pageDetails}
+          selected={portSelected}
+          loading={detailsLoading}
+          error={detailsError}
+        />
+      );
+      break;
+    case "open-port":
+      content = (
+        <OpenPortScreen
+          form={portForm ?? { field: "port", port: "", visibility: "public" }}
+          error={portFormError}
+        />
+      );
+      break;
+    case "delete-sandbox":
+      content = (
+        <DeleteSandboxScreen
+          id={page.id}
+          label={page.label}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "ssh-terminal":
+      content = sshArgv ? (
+        <SshTerminalScreen
+          argv={sshArgv}
+          statusMessage={terminalStatus}
+          onExit={handleSshExit}
+          onSessionChange={handleSessionChange}
+        />
+      ) : (
+        <LoadingPanel
+          loading={false}
+          error="The SSH command could not be built from the configured API URL."
+          title="SSH terminal"
+          fallback="The SSH terminal is unavailable."
+        />
+      );
+      break;
+    default:
+      content = (
+        <ListScreen
+          sandboxes={sandboxes}
+          selected={selected}
+          loading={listLoading}
+          error={listError}
+        />
+      );
   }
 
   return (
@@ -1395,11 +1558,37 @@ export function App() {
       paddingRight={1}
       paddingTop={1}
     >
-      <Header right={config ? safeHost(config.apiUrl) : undefined} />
+      <Header
+        breadcrumbs={breadcrumbTrail(stack)}
+        right={config ? safeHost(config.apiUrl) : undefined}
+      />
       <ToastLine toast={toast} />
       {content}
       <BusyLine message={busyMessage} frame={SPINNER_FRAMES[spinnerFrame] ?? SPINNER_FRAMES[0]} />
       <KeyHints hints={hints} />
+    </box>
+  );
+}
+
+function LoadingPanel({
+  loading,
+  error,
+  title,
+  fallback,
+}: {
+  loading: boolean;
+  error: string | null;
+  title: string;
+  fallback: string;
+}) {
+  return (
+    <box flexGrow={1} alignItems="center" justifyContent="center">
+      <box flexDirection="column" gap={1}>
+        <text fg={colors.accent}>{title}</text>
+        <text fg={loading ? colors.muted : colors.error}>
+          {loading ? "Loading…" : (error ?? fallback)}
+        </text>
+      </box>
     </box>
   );
 }

@@ -1,16 +1,16 @@
 import type { SandboxDetails } from "@lewdev/core";
 import type { ReactNode } from "react";
 
-import { Panel, StatusText } from "../components";
-import type { DetailsMenuItem } from "../details-menu";
-import { formatDateTime, sandboxLabel } from "../format";
+import type { ActionGroup } from "../actions";
+import { ActionScroller, Panel, selectedAction, StatusText } from "../components";
+import { formatCpu, formatDateTime, formatDisk, formatMemory } from "../format";
 import { colors } from "../theme";
 
 interface DetailsScreenProps {
   details: SandboxDetails | null;
   loading: boolean;
   error: string | null;
-  menu: DetailsMenuItem[];
+  groups: ActionGroup[];
   selectedIndex: number;
 }
 
@@ -29,7 +29,7 @@ export function DetailsScreen({
   details,
   loading,
   error,
-  menu,
+  groups,
   selectedIndex,
 }: DetailsScreenProps) {
   if (!details) {
@@ -42,37 +42,43 @@ export function DetailsScreen({
     );
   }
 
-  const selected = menu[selectedIndex];
+  const selected = selectedAction(groups, selectedIndex);
 
   return (
     <box flexDirection="column" flexGrow={1} gap={0}>
       <box
         backgroundColor={colors.panel}
-        paddingLeft={1}
-        paddingRight={1}
-        paddingTop={0}
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        gap={1}
         flexShrink={0}
       >
-        <text fg={colors.accent}>Sandbox {sandboxLabel(details)}</text>
+        <text fg={colors.accent}>Sandbox</text>
         <box flexDirection="column" gap={0}>
-          <InfoRow label="Status">
-            <StatusText status={details.status} />
-          </InfoRow>
           <InfoRow label="Name / ID">
             <text fg={details.name ? colors.text : colors.muted}>
               {details.name ?? "(unnamed)"}
               <span fg={colors.muted}> · {details.id}</span>
             </text>
           </InfoRow>
+          <InfoRow label="Status">
+            <StatusText status={details.status} />
+          </InfoRow>
           <InfoRow label="Image">
             <text fg={colors.text} wrapMode="word">
               {details.image}
             </text>
           </InfoRow>
-          <InfoRow label="CPU / Mem / Disk">
-            <text fg={colors.text}>
-              {details.cpu} CPU · {details.memoryMB} MB · {details.diskGB} GB
-            </text>
+          <InfoRow label="CPU">
+            <text fg={colors.text}>{formatCpu(details.cpu)}</text>
+          </InfoRow>
+          <InfoRow label="Memory">
+            <text fg={colors.text}>{formatMemory(details.memoryMB)}</text>
+          </InfoRow>
+          <InfoRow label="Disk">
+            <text fg={colors.text}>{formatDisk(details.diskGB)}</text>
           </InfoRow>
           <InfoRow label="Created">
             <text fg={colors.text}>{formatDateTime(details.createdAt)}</text>
@@ -81,9 +87,6 @@ export function DetailsScreen({
             <text fg={details.publicURL ? colors.accent : colors.muted} selectable wrapMode="word">
               {details.publicURL || "none"}
             </text>
-          </InfoRow>
-          <InfoRow label="Ports">
-            <text fg={colors.text}>{details.exposedPorts.length} exposed</text>
           </InfoRow>
         </box>
 
@@ -99,43 +102,22 @@ export function DetailsScreen({
         ) : null}
       </box>
 
-      <box flexDirection="column" flexGrow={1} paddingTop={1}>
-        {menu.map((item, index) => {
-          const isSelected = index === selectedIndex;
-          const labelColor =
-            item.tone === "error"
-              ? colors.error
-              : !item.enabled
-                ? colors.muted
-                : isSelected
-                  ? colors.accent
-                  : colors.text;
-          return (
-            <box
-              key={item.id}
-              flexDirection="row"
-              flexShrink={0}
-              paddingLeft={1}
-              paddingRight={1}
-              backgroundColor={isSelected ? colors.selection : undefined}
-            >
-              <box width={2}>
-                <text fg={isSelected ? colors.accent : colors.muted}>{isSelected ? "›" : " "}</text>
-              </box>
-              <box flexGrow={1}>
-                <text fg={labelColor}>{item.label}</text>
-              </box>
-              <text fg={!item.enabled ? colors.muted : isSelected ? colors.accent : colors.muted}>
-                {item.shortcut}
-              </text>
-            </box>
-          );
-        })}
+      <box
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        overflow="hidden"
+        paddingTop={1}
+      >
+        <ActionScroller groups={groups} selectedIndex={selectedIndex} />
       </box>
 
-      <text fg={colors.muted} wrapMode="word" flexShrink={0}>
-        {selected?.description ?? "No actions available."}
-      </text>
+      {selected && !selected.enabled ? (
+        <text fg={colors.muted} wrapMode="word" flexShrink={0}>
+          {selected.unavailableReason ?? "This action is unavailable."}
+        </text>
+      ) : null}
     </box>
   );
 }

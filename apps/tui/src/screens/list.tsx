@@ -4,7 +4,9 @@ import { useTerminalDimensions } from "@opentui/react";
 import { StatusText } from "../components";
 import {
   formatAge,
-  formatResources,
+  formatCpu,
+  formatDisk,
+  formatMemory,
   sandboxLabel,
   shortId,
   shortStatus,
@@ -22,20 +24,25 @@ interface ListScreenProps {
 const WIDTHS = {
   cursor: 2,
   name: 16,
-  id: 11,
+  id: 13,
   image: 16,
-  status: 10,
-  resources: 13,
+  status: 12,
+  cpu: 9,
+  memory: 10,
+  disk: 9,
 } as const;
 
 export function ListScreen({ sandboxes, selected, loading, error }: ListScreenProps) {
   const { height } = useTerminalDimensions();
-  const visibleRows = Math.max(3, height - 13);
+  // Leave room for the table header, the separator, the New sandbox button,
+  // the footer and the page chrome so the button is never pushed out.
+  const visibleRows = Math.max(1, height - 15);
   const start = Math.max(
     0,
     Math.min(selected - Math.floor(visibleRows / 2), sandboxes.length - visibleRows),
   );
   const visible = sandboxes.slice(start, start + visibleRows);
+  const newSelected = selected >= sandboxes.length;
 
   return (
     <box flexDirection="column" flexGrow={1}>
@@ -50,7 +57,7 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
         </text>
       ) : null}
 
-      <box flexDirection="column" flexGrow={1} paddingTop={1}>
+      <box flexDirection="column" flexShrink={0} paddingTop={1}>
         <box flexDirection="row" flexShrink={0} paddingLeft={1}>
           <box width={WIDTHS.cursor}>
             <text> </text>
@@ -67,8 +74,14 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
           <box width={WIDTHS.status}>
             <text fg={colors.muted}>STATUS</text>
           </box>
-          <box width={WIDTHS.resources}>
-            <text fg={colors.muted}>CPU / MEM</text>
+          <box width={WIDTHS.cpu}>
+            <text fg={colors.muted}>CPU</text>
+          </box>
+          <box width={WIDTHS.memory}>
+            <text fg={colors.muted}>MEMORY</text>
+          </box>
+          <box width={WIDTHS.disk}>
+            <text fg={colors.muted}>DISK</text>
           </box>
           <box flexGrow={1}>
             <text fg={colors.muted}>CREATED</text>
@@ -82,12 +95,9 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
         ) : null}
 
         {!loading && sandboxes.length === 0 ? (
-          <box flexDirection="column" paddingLeft={1} paddingTop={1} gap={1}>
-            <text fg={colors.muted}>No sandboxes yet.</text>
-            <text fg={colors.text}>
-              Press <span fg={colors.accent}>n</span> to create one from an image.
-            </text>
-          </box>
+          <text fg={colors.muted} paddingLeft={1} paddingTop={1}>
+            No sandboxes yet.
+          </text>
         ) : null}
 
         {visible.map((sandbox, index) => {
@@ -118,10 +128,14 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
               <box width={WIDTHS.status}>
                 <StatusText status={sandbox.status} label={shortStatus(sandbox.status)} />
               </box>
-              <box width={WIDTHS.resources}>
-                <text fg={colors.muted}>
-                  {truncate(formatResources(sandbox.cpu, sandbox.memoryMB), WIDTHS.resources - 1)}
-                </text>
+              <box width={WIDTHS.cpu}>
+                <text fg={colors.muted}>{formatCpu(sandbox.cpu)}</text>
+              </box>
+              <box width={WIDTHS.memory}>
+                <text fg={colors.muted}>{formatMemory(sandbox.memoryMB)}</text>
+              </box>
+              <box width={WIDTHS.disk}>
+                <text fg={colors.muted}>{formatDisk(sandbox.diskGB)}</text>
               </box>
               <box flexGrow={1}>
                 <text fg={colors.muted}>{formatAge(sandbox.createdAt)}</text>
@@ -129,6 +143,17 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
             </box>
           );
         })}
+      </box>
+
+      <box height={1} flexShrink={0} />
+      <box
+        flexDirection="row"
+        flexShrink={0}
+        paddingLeft={1}
+        paddingRight={1}
+        backgroundColor={newSelected ? colors.selection : colors.panel}
+      >
+        <text fg={newSelected ? colors.accent : colors.text}>+ New sandbox</text>
       </box>
     </box>
   );

@@ -6,6 +6,7 @@ import {
   type ExposeVisibility,
   type GetOptions,
   type HealthStatus,
+  Image,
   type ListOptions,
   MicroVM,
   type SandboxStatus,
@@ -84,7 +85,10 @@ export interface SandboxDetails extends SandboxInfo {
 }
 
 export interface CreateSandboxInput {
-  image: string;
+  /** A base image reference. Mutually exclusive with `dockerfile`. */
+  image?: string;
+  /** Dockerfile contents. Mutually exclusive with `image`. */
+  dockerfile?: string;
   name?: string;
   cpu?: number;
   memoryMB?: number;
@@ -168,12 +172,18 @@ export class LewdevApi {
   }
 
   async createSandbox(input: CreateSandboxInput): Promise<CreatedSandbox> {
-    const image = input.image.trim();
-    if (!image) {
-      throw new Error("Image is required.");
+    const image = input.image?.trim() ?? "";
+    const dockerfile = input.dockerfile?.trim() ?? "";
+    if (image && dockerfile) {
+      throw new Error("Provide either an image or a Dockerfile, not both.");
+    }
+    if (!image && !dockerfile) {
+      throw new Error("An image or Dockerfile is required.");
     }
 
-    const options: CreateOptions = { image };
+    const options: CreateOptions = {
+      image: dockerfile ? Image.fromDockerfile(dockerfile) : image,
+    };
     const name = input.name?.trim();
     if (name) {
       options.name = name;
