@@ -5,6 +5,8 @@ export type ActionId =
   | "start"
   | "stop"
   | "restart"
+  | "resize"
+  | "lifecycle"
   | "ssh"
   | "ssh-info"
   | "setup-ssh"
@@ -112,6 +114,7 @@ interface SandboxReasons {
   start?: string;
   stop?: string;
   restart?: string;
+  manage?: string;
   addKey?: string;
 }
 
@@ -181,6 +184,7 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
     start: startReason,
     stop: stopReason,
     restart: restartReason,
+    manage: blocked,
   };
 }
 
@@ -384,6 +388,22 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       reasons.restart,
     ),
     action(
+      "resize",
+      "Resize",
+      "resize",
+      undefined,
+      "Change the sandbox's CPU, memory or disk.",
+      reasons.manage,
+    ),
+    action(
+      "lifecycle",
+      "Lifecycle",
+      "lifecycle",
+      undefined,
+      "Stop, delete, restart or wake the sandbox automatically.",
+      reasons.manage,
+    ),
+    action(
       "delete",
       "Delete sandbox",
       "delete",
@@ -481,7 +501,7 @@ export function buildSandboxPageGroups(
   }));
 
   return [
-    { actions: collect(["start", "stop", "restart", "delete"]) },
+    { actions: collect(["start", "stop", "restart", "resize", "lifecycle", "delete"]) },
     { title: "Terminal", actions: collect(["ssh"]) },
     {
       title: "SSH",
@@ -934,6 +954,36 @@ export function buildConnectActions(context: { canGoBack: boolean }): PageAction
       "Return to the previous page.",
       context.canGoBack ? undefined : "Connect to a server first.",
     ),
+  ];
+}
+
+/** Actions on the Lifecycle form page. */
+export function buildLifecycleActions(): PageAction[] {
+  return [
+    action(
+      "submit",
+      "Save lifecycle",
+      "save",
+      "enter",
+      "Save the automatic stop, delete, restart and wake settings.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to the sandbox page.", undefined),
+  ];
+}
+
+/** Actions on the Resize form page. */
+export function buildResizeActions(): PageAction[] {
+  return [
+    action(
+      "submit",
+      "Resize",
+      "resize",
+      "enter",
+      "Apply the new CPU, memory and disk sizes.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to the sandbox page.", undefined),
   ];
 }
 

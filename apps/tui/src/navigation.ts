@@ -14,6 +14,8 @@ export type Page =
   | ({ kind: "create-snapshot" } & SandboxPageTarget)
   | ({ kind: "confirm-create-snapshot" } & SandboxPageTarget)
   | ({ kind: "sandbox" } & SandboxPageTarget)
+  | ({ kind: "resize" } & SandboxPageTarget)
+  | ({ kind: "lifecycle" } & SandboxPageTarget)
   | ({ kind: "ssh-details" } & SandboxPageTarget)
   | ({ kind: "setup-ssh" } & SandboxPageTarget)
   | ({ kind: "ssh-include"; purpose: "setup" | "vscode" } & SandboxPageTarget)
@@ -44,6 +46,8 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   "create-snapshot": "Create snapshot",
   "confirm-create-snapshot": "Confirm snapshot",
   sandbox: null,
+  resize: "Resize",
+  lifecycle: "Lifecycle",
   "ssh-details": "Settings",
   "setup-ssh": "Set up SSH",
   "ssh-include": "Allow SSH config",

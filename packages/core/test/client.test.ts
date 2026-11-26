@@ -6,9 +6,11 @@ import type {
   ExposePortOptions,
   ExposeResult,
   HealthStatus,
+  Lifecycle,
   ListOptions,
   ListSnapshotsOptions,
   RegisterSnapshotOptions,
+  ResizeOptions,
   SandboxSnapshot,
   SnapshotList,
   TeamQuota,
@@ -53,6 +55,7 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
     createdAt,
     updatedAt: createdAt,
     lastActiveAt: createdAt,
+    lifecycle: {},
   };
 
   return {
@@ -111,6 +114,8 @@ function fakeSdk(
     create?: (options: CreateOptions) => SdkSandbox;
     list?: () => SdkSandbox[];
     get?: () => SdkSandbox;
+    resize?: (id: string, resizeOptions: ResizeOptions) => SdkSandbox;
+    updateLifecycle?: (id: string, lifecycle: Lifecycle) => SdkSandbox;
     health?: HealthStatus;
     createSnapshot?: (
       id: string,
@@ -150,6 +155,14 @@ function fakeSdk(
     },
     destroy: async (id: string): Promise<void> => {
       calls.push({ method: "destroy", args: [id] });
+    },
+    resize: async (id: string, resizeOptions: ResizeOptions): Promise<SdkSandbox> => {
+      calls.push({ method: "resize", args: [id, resizeOptions] });
+      return options.resize?.(id, resizeOptions) ?? sandbox({ id });
+    },
+    updateLifecycle: async (id: string, lifecycle: Lifecycle): Promise<SdkSandbox> => {
+      calls.push({ method: "updateLifecycle", args: [id, lifecycle] });
+      return options.updateLifecycle?.(id, lifecycle) ?? sandbox({ id, lifecycle });
     },
     health: async (_call?: CallOptions): Promise<HealthStatus> => {
       calls.push({ method: "health", args: [] });
@@ -233,6 +246,7 @@ describe("LewdevApi", () => {
       list: () => [
         sandbox({
           name: "dev",
+          runtime: "docker",
           exposedPorts: [
             {
               port: 3000,
@@ -250,6 +264,7 @@ describe("LewdevApi", () => {
     expect(items).toHaveLength(1);
     expectSandbox(items[0] as SandboxInfo);
     expect(items[0]?.name).toBe("dev");
+    expect(items[0]?.runtime).toBe("docker");
     expect(items[0]?.exposedPorts).toEqual([
       { port: 3000, url: "https://sb.example.com/3000", visibility: "token", protocol: "http" },
     ]);
@@ -323,6 +338,131 @@ describe("LewdevApi", () => {
     const details = await api.getSandbox("sb-0123456789abcdef");
     expect(details.osUser).toBe("sandbox");
     expect(details.sshPublicKey).toBe("ssh-ed25519 AAAA");
+  });
+
+  test("maps runtime, reason, tags and lifecycle durations into details", async () => {
+    const { sdk } = fakeSdk({
+      get: () =>
+        sandbox({
+          runtime: "docker",
+          status: "stopped",
+          statusReason: "idle",
+          exitCode: 137,
+          tags: { env: "dev", owner: "acme" },
+          lifecycle: {
+            stopIfIdleFor: 30 * 60 * 1_000_000_000,
+            destroyIfIdleFor: 24 * 60 * 60 * 1_000_000_000,
+            serverless: true,
+            restartOnFailure: true,
+          },
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    const details = await api.getSandbox("sb-0123456789abcdef");
+    expect(details.runtime).toBe("docker");
+    expect(details.statusReason).toBe("idle");
+    expect(details.exitCode).toBe(137);
+    expect(details.tags).toEqual({ env: "dev", owner: "acme" });
+    expect(details.lifecycle).toEqual({
+      stopIfIdleForMS: 30 * 60 * 1000,
+      destroyIfIdleForMS: 24 * 60 * 60 * 1000,
+      serverless: true,
+      restartOnFailure: true,
+    });
+  });
+
+  test("sends no lifecycle on create when none was chosen", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.createSandbox({ image: "ubuntu:24.04" });
+    expect(calls[0]?.args[0]).not.toHaveProperty("lifecycle");
+  });
+
+  test("converts create lifecycle milliseconds to integer nanoseconds", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.createSandbox({
+      image: "ubuntu:24.04",
+      lifecycle: {
+        stopIfIdleForMS: 30 * 60 * 1000,
+        serverless: true,
+        restartOnFailure: false,
+      },
+    });
+    expect(calls[0]).toEqual({
+      method: "create",
+      args: [
+        {
+          image: "ubuntu:24.04",
+          lifecycle: {
+            stopIfIdleFor: 30 * 60 * 1_000_000_000,
+            serverless: true,
+            restartOnFailure: false,
+          },
+        },
+      ],
+    });
+  });
+
+  test("resizes with only the supplied dimensions and maps the result", async () => {
+    const { sdk, calls } = fakeSdk({
+      resize: (id, resizeOptions) =>
+        sandbox({
+          id,
+          cpu: resizeOptions.cpu ?? 2,
+          memoryMB: resizeOptions.memoryMB ?? 2048,
+          diskGB: resizeOptions.diskGB ?? 10,
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    const details = await api.resize("sb-abc", { cpu: 8, memoryMB: 16384 });
+    expect(calls[0]).toEqual({
+      method: "resize",
+      args: ["sb-abc", { cpu: 8, memoryMB: 16384 }],
+    });
+    expect(details.cpu).toBe(8);
+    expect(details.memoryMB).toBe(16384);
+  });
+
+  test("updates lifecycle with every timer converted to nanoseconds", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    const details = await api.updateLifecycle("sb-abc", {
+      stopIfIdleForMS: 15 * 60 * 1000,
+      destroyIfIdleForMS: 3 * 24 * 60 * 60 * 1000,
+      stopAtAgeMS: 2 * 60 * 60 * 1000,
+      serverless: true,
+      restartOnFailure: true,
+    });
+    expect(calls[0]).toEqual({
+      method: "updateLifecycle",
+      args: [
+        "sb-abc",
+        {
+          stopIfIdleFor: 15 * 60 * 1_000_000_000,
+          destroyIfIdleFor: 3 * 24 * 60 * 60 * 1_000_000_000,
+          stopAtAge: 2 * 60 * 60 * 1_000_000_000,
+          serverless: true,
+          restartOnFailure: true,
+        },
+      ],
+    });
+    expect(details.lifecycle.stopIfIdleForMS).toBe(15 * 60 * 1000);
+  });
+
+  test("rejects non-positive or fractional lifecycle durations before calling the server", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await expect(api.updateLifecycle("sb-abc", { stopIfIdleForMS: 0 })).rejects.toThrow(
+      "positive whole milliseconds",
+    );
+    await expect(api.updateLifecycle("sb-abc", { stopIfIdleForMS: 1.5 })).rejects.toThrow(
+      "positive whole milliseconds",
+    );
+    expect(calls).toHaveLength(0);
   });
 
   test("restarts by stopping before starting", async () => {

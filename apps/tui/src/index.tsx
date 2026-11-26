@@ -5,9 +5,11 @@ import {
   describeError,
   downloadVerifiedUpdate,
   installUpdate,
+  isSandboxCommand,
   isStandaloneBuild,
   LewdevApi,
   loadConfig,
+  runSandboxCli,
   runSshProxy,
   UpdateError,
   writeUpdateState,
@@ -24,6 +26,13 @@ const HELP = `lewdev ${VERSION} — a terminal client for AerolVM sandboxes
 Usage: lewdev [--help] [--version]
        lewdev update [--check]
        lewdev ssh-proxy <sandbox-id>
+       lewdev ls [--json]
+       lewdev start <sandbox>
+       lewdev stop <sandbox>
+       lewdev delete <sandbox> [--yes]
+       lewdev ssh <sandbox>
+       lewdev code <sandbox> [remote-path]
+       lewdev exec <sandbox> -- <command...>
 
 Configuration:
   $XDG_CONFIG_HOME/lewdev/config.json (or ~/.config/lewdev/config.json)
@@ -33,6 +42,15 @@ Environment overrides:
   SB_API_URL             AerolVM server URL
   SB_API_TOKEN           AerolVM API token
   LEWDEV_NO_UPDATE_CHECK=1 disables the startup update check
+
+Sandbox commands:
+  <sandbox> is an exact sandbox ID, then an exact name. Ambiguous names fail.
+  ls                     List sandboxes; --json prints lewdev's SandboxInfo array
+  start / stop           Start or stop a sandbox
+  delete                 Delete a sandbox and its local keys; asks unless --yes
+  ssh                    Open a direct SSH session, or the gateway when not set up
+  code                   Open VS Code Remote-SSH (direct SSH must be set up)
+  exec                   Run a command and stream its output and exit code
 
 Direct SSH:
   lewdev ssh-proxy <id>  Internal ProxyCommand endpoint (stdout is the SSH stream)
@@ -114,11 +132,17 @@ async function main(): Promise<void> {
     void cleanupPreviousBinary();
   }
   const args = process.argv.slice(2);
-  if (args.includes("--help") || args.includes("-h")) {
+  const helpRequested =
+    args[0] === "--help" || args[0] === "-h" || (args[0] !== "exec" && args.includes("--help"));
+  if (helpRequested) {
     printHelp();
     return;
   }
-  if (args.includes("--version") || args.includes("-v")) {
+  if (
+    args[0] === "--version" ||
+    args[0] === "-v" ||
+    (args[0] !== "exec" && args.includes("--version"))
+  ) {
     console.log(`lewdev ${VERSION}`);
     return;
   }
@@ -152,6 +176,10 @@ async function main(): Promise<void> {
       console.error(describeError(error));
       process.exitCode = 1;
     }
+    return;
+  }
+  if (isSandboxCommand(args[0])) {
+    process.exitCode = await runSandboxCli(args);
     return;
   }
   if (args.length > 0) {

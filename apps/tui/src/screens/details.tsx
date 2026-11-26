@@ -1,9 +1,17 @@
-import type { SandboxDetails } from "@lewdev/core";
+import type { SandboxDetails, SandboxStatusReason } from "@lewdev/core";
 import type { ReactNode } from "react";
 
 import type { ActionGroup } from "../actions";
 import { ActionScroller, Panel, selectedAction, StatusText } from "../components";
-import { formatCpu, formatDateTime, formatDisk, formatMemory } from "../format";
+import {
+  formatAge,
+  formatCpu,
+  formatDateTime,
+  formatDisk,
+  formatMemory,
+  runtimeLabel,
+} from "../format";
+import { describeLifecycle } from "../lifecycle-form";
 import { colors } from "../theme";
 
 interface DetailsScreenProps {
@@ -25,6 +33,32 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+const STATUS_REASON_TEXT: Record<SandboxStatusReason, string> = {
+  user_stop: "Stopped by a user",
+  idle: "Stopped after being idle",
+  max_age: "Stopped after reaching its maximum age",
+  out_of_memory: "Stopped: out of memory",
+  disk_limit: "Stopped: disk limit reached",
+  crashed: "Stopped: crashed",
+  reconcile: "Stopped: the server found it stopped unexpectedly",
+  program_exited: "Main program exited",
+  failover: "Recreated on another server after a failure",
+  restarted: "Restarted after a crash",
+  failover_disabled: "Failover was disabled for this sandbox",
+  ownership_lease_expired: "Stopped: its server lost contact with the cluster",
+};
+
+function statusReasonText(
+  reason: SandboxStatusReason | undefined,
+  exitCode: number | undefined,
+): string | null {
+  if (reason === undefined) {
+    return null;
+  }
+  const text = STATUS_REASON_TEXT[reason] ?? `Status reason: ${reason}`;
+  return exitCode === undefined ? text : `${text} (exit code ${exitCode})`;
+}
+
 export function DetailsScreen({
   details,
   loading,
@@ -43,6 +77,7 @@ export function DetailsScreen({
   }
 
   const selected = selectedAction(groups, selectedIndex);
+  const lastActive = formatAge(details.lastActiveAt);
 
   return (
     <box flexDirection="column" flexGrow={1} gap={0}>
@@ -70,9 +105,21 @@ export function DetailsScreen({
           <InfoRow label="Status">
             <StatusText status={details.status} />
           </InfoRow>
+          {statusReasonText(details.statusReason, details.exitCode) ? (
+            <InfoRow label="Reason">
+              <text fg={colors.text} wrapMode="word">
+                {statusReasonText(details.statusReason, details.exitCode)}
+              </text>
+            </InfoRow>
+          ) : null}
           <InfoRow label="Image">
             <text fg={colors.text} wrapMode="word">
               {details.image}
+            </text>
+          </InfoRow>
+          <InfoRow label="Runtime">
+            <text fg={details.runtime ? colors.text : colors.muted}>
+              {runtimeLabel(details.runtime)}
             </text>
           </InfoRow>
           <InfoRow label="CPU">
@@ -86,6 +133,23 @@ export function DetailsScreen({
           </InfoRow>
           <InfoRow label="Created">
             <text fg={colors.text}>{formatDateTime(details.createdAt)}</text>
+          </InfoRow>
+          <InfoRow label="Last active">
+            <text fg={colors.text}>{lastActive === "—" ? "—" : `${lastActive} ago`}</text>
+          </InfoRow>
+          <InfoRow label="Lifecycle">
+            <text fg={colors.text} wrapMode="word">
+              {describeLifecycle(details.lifecycle)}
+            </text>
+          </InfoRow>
+          <InfoRow label="Tags">
+            <text fg={colors.text} wrapMode="word">
+              {Object.keys(details.tags).length === 0
+                ? "none"
+                : Object.entries(details.tags)
+                    .map(([key, value]) => `${key}=${value}`)
+                    .join(", ")}
+            </text>
           </InfoRow>
           <InfoRow label="Public URL">
             <text fg={details.publicURL ? colors.accent : colors.muted} selectable wrapMode="word">

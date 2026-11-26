@@ -17,13 +17,14 @@ function snapshotWidthOf(columns: ReturnType<typeof visibleSnapshotColumns>): nu
 
 describe("list columns", () => {
   test("shows every column when the card is wide enough", () => {
-    const columns = visibleListColumns(96);
+    const columns = visibleListColumns(112);
     expect(columns).toEqual([
       "cursor",
       "name",
       "id",
       "image",
       "status",
+      "runtime",
       "cpu",
       "memory",
       "disk",
@@ -32,8 +33,18 @@ describe("list columns", () => {
   });
 
   test("drops CREATED first", () => {
-    const columns = visibleListColumns(90);
+    const columns = visibleListColumns(100);
     expect(columns).not.toContain("created");
+    expect(columns).toContain("runtime");
+    expect(columns).toContain("disk");
+    expect(columns).toContain("id");
+    expect(widthOf(columns)).toBe(99);
+  });
+
+  test("drops RUNTIME next while keeping DISK and ID", () => {
+    const columns = visibleListColumns(96);
+    expect(columns).not.toContain("created");
+    expect(columns).not.toContain("runtime");
     expect(columns).toContain("disk");
     expect(columns).toContain("id");
     expect(widthOf(columns)).toBe(87);
@@ -42,6 +53,7 @@ describe("list columns", () => {
   test("drops DISK next while keeping ID", () => {
     const columns = visibleListColumns(80);
     expect(columns).not.toContain("created");
+    expect(columns).not.toContain("runtime");
     expect(columns).not.toContain("disk");
     expect(columns).toContain("id");
     expect(widthOf(columns)).toBe(78);

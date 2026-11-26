@@ -7,6 +7,7 @@ import {
   formatCpu,
   formatDisk,
   formatMemory,
+  runtimeLabel,
   sandboxLabel,
   shortId,
   shortStatus,
@@ -86,6 +87,11 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
             <box width={WIDTHS.status}>
               <text fg={colors.muted}>STATUS</text>
             </box>
+            {show("runtime") ? (
+              <box width={WIDTHS.runtime}>
+                <text fg={colors.muted}>RUNTIME</text>
+              </box>
+            ) : null}
             <box width={WIDTHS.cpu}>
               <text fg={colors.muted}>CPU</text>
             </box>
@@ -147,6 +153,13 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
                 <box width={WIDTHS.status}>
                   <StatusText status={sandbox.status} label={shortStatus(sandbox.status)} />
                 </box>
+                {show("runtime") ? (
+                  <box width={WIDTHS.runtime}>
+                    <text fg={sandbox.runtime ? colors.text : colors.muted}>
+                      {truncate(runtimeLabel(sandbox.runtime), WIDTHS.runtime - 1)}
+                    </text>
+                  </box>
+                ) : null}
                 <box width={WIDTHS.cpu}>
                   <text fg={colors.muted}>{formatCpu(sandbox.cpu)}</text>
                 </box>

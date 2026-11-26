@@ -52,6 +52,8 @@ describe("sandbox page actions", () => {
       "start",
       "stop",
       "restart",
+      "resize",
+      "lifecycle",
       "delete",
       "ssh",
       "setup-ssh",
@@ -69,6 +71,8 @@ describe("sandbox page actions", () => {
       start: undefined,
       stop: undefined,
       restart: undefined,
+      resize: undefined,
+      lifecycle: undefined,
       delete: undefined,
       ssh: undefined,
       "setup-ssh": undefined,
@@ -215,7 +219,7 @@ describe("sandbox page groups", () => {
       undefined,
     ]);
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
-      ["start", "stop", "restart", "delete"],
+      ["start", "stop", "restart", "resize", "lifecycle", "delete"],
       ["ssh"],
       ["setup-ssh", "open-vscode", "copy-ssh", "ssh-info"],
       ["ports"],
@@ -575,7 +579,7 @@ describe("action selection and hints", () => {
   });
 
   test("keeps the selected id across a rebuild and wraps", () => {
-    expect(actionIndex(actions, "ports")).toBe(9);
+    expect(actionIndex(actions, "ports")).toBe(11);
     expect(actionIndex(actions, "missing" as never)).toBe(0);
     // With nothing selected, the first enabled action wins: Start is disabled while running.
     expect(actionIndex(actions, null)).toBe(1);

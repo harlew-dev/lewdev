@@ -5,6 +5,7 @@ export type ListColumn =
   | "source"
   | "image"
   | "status"
+  | "runtime"
   | "cpu"
   | "memory"
   | "disk"
@@ -28,6 +29,7 @@ export const LIST_COLUMN_WIDTHS: Record<ListColumn, number> = {
   source: 14,
   image: 16,
   status: 12,
+  runtime: 12,
   cpu: 9,
   memory: 10,
   disk: 9,
@@ -40,17 +42,19 @@ export const LIST_COLUMNS: ListColumn[] = [
   "id",
   "image",
   "status",
+  "runtime",
   "cpu",
   "memory",
   "disk",
   "created",
 ];
 
-const DROP_ORDER: ListColumn[] = ["created", "disk", "id"];
+const DROP_ORDER: ListColumn[] = ["created", "runtime", "disk", "id"];
 
 /**
  * Chooses the columns that fit the card's inner width. CREATED is dropped
- * first, then DISK, then ID; STATUS always stays so the badge remains intact.
+ * first, then RUNTIME, DISK and ID; STATUS always stays so the badge remains
+ * intact.
  */
 export function visibleListColumns(innerWidth: number): ListColumn[] {
   const dropped = new Set<ListColumn>();

@@ -213,15 +213,17 @@ export function SegmentedRow({
   options,
   selected,
   active,
+  labelWidth = 14,
 }: {
   label: string;
   options: ReadonlyArray<{ id: string; label: string }>;
   selected: string;
   active: boolean;
+  labelWidth?: number;
 }) {
   return (
     <box flexDirection="row" flexShrink={0} gap={1} alignItems="center">
-      <box width={14} flexShrink={0}>
+      <box width={labelWidth} flexShrink={0}>
         <text fg={active ? colors.accent : colors.muted}>{label}</text>
       </box>
       {options.map((option) => {

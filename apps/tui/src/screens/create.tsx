@@ -15,6 +15,7 @@ import {
   SIZE_CHOICES,
   sizePreset,
   snapshotOptionIndex,
+  STOP_IDLE_CHOICES,
 } from "../create-form";
 import { truncate } from "../format";
 import { colors } from "../theme";
@@ -40,6 +41,7 @@ const FOCUS_IDS: Record<CreateFocus, string> = {
   "size-cpu": "create-size-cpu",
   "size-memory": "create-size-memory",
   "size-disk": "create-size-disk",
+  "stop-idle": "create-stop-idle",
   name: "create-name",
   submit: "create-submit",
 };
@@ -311,6 +313,15 @@ export function CreateScreen({
               </box>
             </>
           ) : null}
+
+          <box id="create-stop-idle">
+            <SegmentedRow
+              label="Stop when idle"
+              options={STOP_IDLE_CHOICES}
+              selected={values.stopIdle}
+              active={focus === "stop-idle"}
+            />
+          </box>
 
           <box id="create-name">
             <Field

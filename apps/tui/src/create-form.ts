@@ -1,4 +1,4 @@
-import type { SnapshotInfo } from "@lewdev/core";
+import type { SandboxLifecycle, SnapshotInfo } from "@lewdev/core";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -7,6 +7,7 @@ import { formatAge } from "./format";
 export type ImageSource = "preset" | "snapshot" | "custom" | "dockerfile";
 export type DockerfileMode = "file" | "paste";
 export type SizeId = "small" | "default" | "large" | "xlarge" | "custom";
+export type StopIdleId = "off" | "15m" | "30m" | "1h" | "2h" | "4h";
 export type CreateFocus =
   | "image"
   | "image-ref"
@@ -17,10 +18,18 @@ export type CreateFocus =
   | "size-cpu"
   | "size-memory"
   | "size-disk"
+  | "stop-idle"
   | "name"
   | "submit";
 
-export interface CreateFormValues {
+export interface SizeFormValues {
+  size: SizeId;
+  customCpu: string;
+  customMemoryGB: string;
+  customDiskGB: string;
+}
+
+export interface CreateFormValues extends SizeFormValues {
   imageSource: ImageSource;
   image: string;
   snapshotName: string;
@@ -28,10 +37,7 @@ export interface CreateFormValues {
   dockerfileMode: DockerfileMode;
   dockerfilePath: string;
   dockerfileContents: string;
-  size: SizeId;
-  customCpu: string;
-  customMemoryGB: string;
-  customDiskGB: string;
+  stopIdle: StopIdleId;
   name: string;
 }
 
@@ -47,8 +53,33 @@ export const CREATE_DEFAULT: CreateFormValues = {
   customCpu: "",
   customMemoryGB: "",
   customDiskGB: "",
+  stopIdle: "off",
   name: "",
 };
+
+const MINUTE_MS = 60 * 1000;
+
+export const STOP_IDLE_CHOICES: Array<{ id: StopIdleId; label: string; ms?: number }> = [
+  { id: "off", label: "Off" },
+  { id: "15m", label: "15m", ms: 15 * MINUTE_MS },
+  { id: "30m", label: "30m", ms: 30 * MINUTE_MS },
+  { id: "1h", label: "1h", ms: 60 * MINUTE_MS },
+  { id: "2h", label: "2h", ms: 120 * MINUTE_MS },
+  { id: "4h", label: "4h", ms: 240 * MINUTE_MS },
+];
+
+/** Create-time lifecycle, or undefined when the sandbox should have no timers. */
+export function createLifecycleInput(values: CreateFormValues): SandboxLifecycle | undefined {
+  const choice = STOP_IDLE_CHOICES.find((entry) => entry.id === values.stopIdle);
+  return choice?.ms === undefined ? undefined : { stopIfIdleForMS: choice.ms };
+}
+
+export function toggleStopIdle(current: StopIdleId, delta: number): StopIdleId {
+  const index = STOP_IDLE_CHOICES.findIndex((choice) => choice.id === current);
+  const base = Math.max(index, 0);
+  const next = (base + delta + STOP_IDLE_CHOICES.length) % STOP_IDLE_CHOICES.length;
+  return STOP_IDLE_CHOICES[next]?.id ?? "off";
+}
 
 export interface SizePreset {
   id: Exclude<SizeId, "custom">;
@@ -211,7 +242,7 @@ export function moveSize(id: SizeId, delta: number): SizeId {
   return SIZE_CHOICES[next]?.id ?? "default";
 }
 
-export function createSizeSummary(values: CreateFormValues): string {
+export function createSizeSummary(values: SizeFormValues): string {
   const preset = sizePreset(values.size);
   if (preset) {
     return `${preset.cpu} vCPU · ${preset.memoryMB / 1024} GB memory · ${preset.diskGB} GB disk`;
@@ -235,7 +266,7 @@ export function createFocusOrder(values: CreateFormValues): CreateFocus[] {
   if (values.size === "custom") {
     order.push("size-cpu", "size-memory", "size-disk");
   }
-  order.push("name", "submit");
+  order.push("stop-idle", "name", "submit");
   return order;
 }
 
@@ -427,7 +458,7 @@ export interface CreateSizeInput {
  * Converts the size choice to create options. Custom memory is typed in GB and
  * rounded to whole MB; a result under 1 MB is rejected.
  */
-export function createSizeInput(values: CreateFormValues): CreateSizeInput {
+export function createSizeInput(values: SizeFormValues): CreateSizeInput {
   const preset = sizePreset(values.size);
   if (preset) {
     return { cpu: preset.cpu, memoryMB: preset.memoryMB, diskGB: preset.diskGB };

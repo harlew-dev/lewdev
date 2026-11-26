@@ -29,8 +29,22 @@ Run `lewdev` and enter your [AerolVM](https://microvm.aerol.ai/) API URL and tok
 
 Switch tabs with `Tab` or `1`/`2`, move with the arrow keys, select with `Enter` and go back with `Esc`.
 
+#### Scriptable CLI
+
+Run sandboxes without opening the TUI:
+
+```sh
+lewdev ls --json
+lewdev start web
+lewdev ssh web
+lewdev exec web -- uname -a
+```
+
+See [CLI](docs/cli.md) for every subcommand, sandbox name resolution and exit codes.
+
 ### Documentation
 
+- [CLI](docs/cli.md)
 - [Install](docs/install.md)
 - [Updates](docs/updates.md)
 - [Configuration](docs/configuration.md)

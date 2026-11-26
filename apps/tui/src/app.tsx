@@ -20,6 +20,7 @@ import {
   enablePublicDirectSsh,
   ensureKnownHostsFile,
   ensureSshdRunning,
+  openInVscode,
   forgetHostKey,
   formatDirectSshCommand,
   formatExplicitSshCommand,
@@ -47,7 +48,6 @@ import {
   readDirectPublicKey,
   readDirectSshConfigBlock,
   type RegisterSnapshotInput,
-  remotePathForUrl,
   removeAuthorizedKey,
   resetDirectSsh,
   resolveRemotePath,
@@ -71,7 +71,6 @@ import {
 import type { KeyEvent } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
 import { useKeyboard, usePaste, useRenderer } from "@opentui/react";
-import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -88,6 +87,7 @@ import {
   buildCreateSnapshotConfirmActions,
   buildDeleteActions,
   buildForgetHostActions,
+  buildLifecycleActions,
   buildNewSandboxActions,
   buildNewSnapshotActions,
   buildOpenPortActions,
@@ -99,6 +99,7 @@ import {
   buildEnablePublicSshActions,
   buildRemoveSshKeyActions,
   buildResetSshActions,
+  buildResizeActions,
   buildSandboxPageGroups,
   buildSetupSshActions,
   buildSnapshotDeleteActions,
@@ -141,6 +142,7 @@ import {
   CREATE_DEFAULT,
   type CreateFocus,
   type CreateFormValues,
+  createLifecycleInput,
   createSizeInput,
   type DockerfileMode,
   IMAGE_MENU_OPTIONS,
@@ -154,6 +156,7 @@ import {
   selectSnapshotOption,
   snapshotOptionIndex,
   toggleDockerfileMode,
+  toggleStopIdle,
 } from "./create-form";
 import { CreateScreen } from "./screens/create";
 import { ConfirmCreateSnapshotScreen } from "./screens/confirm-create-snapshot";
@@ -163,6 +166,28 @@ import { DeleteSandboxScreen } from "./screens/delete-sandbox";
 import { DeleteSnapshotScreen } from "./screens/delete-snapshot";
 import { DetailsScreen } from "./screens/details";
 import { DisableSshScreen } from "./screens/disable-ssh";
+import {
+  choicesWithCurrent,
+  DELETE_IDLE_CHOICES,
+  type LifecycleFocus,
+  type LifecycleFormValues,
+  lifecycleFormFromDetails,
+  lifecycleUpdateInput,
+  moveLifecycleChoice,
+  nextLifecycleFocus,
+  restartOnFailureAllowed,
+  STOP_IDLE_CHOICES,
+  validateLifecycleForm,
+} from "./lifecycle-form";
+import {
+  nextResizeFocus,
+  type ResizeFocus,
+  type ResizeFormValues,
+  resizeSizeInput,
+  resizeValuesFromDetails,
+} from "./resize-form";
+import { LifecycleScreen } from "./screens/lifecycle";
+import { ResizeScreen } from "./screens/resize";
 import { EnablePublicSshScreen } from "./screens/enable-public-ssh";
 import { ForgetHostScreen } from "./screens/forget-host";
 import { ListScreen } from "./screens/list";
@@ -379,6 +404,13 @@ export function App() {
   const [snapshotMenuOpen, setSnapshotMenuOpen] = useState(false);
   const [snapshotMenuIndex, setSnapshotMenuIndex] = useState(0);
 
+  const [lifecycleValues, setLifecycleValues] = useState<LifecycleFormValues | null>(null);
+  const [lifecycleFocus, setLifecycleFocus] = useState<LifecycleFocus>("stop-idle");
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [resizeValues, setResizeValues] = useState<ResizeFormValues | null>(null);
+  const [resizeFocus, setResizeFocus] = useState<ResizeFocus>("size");
+  const [resizeError, setResizeError] = useState<string | null>(null);
+
   const [details, setDetails] = useState<SandboxDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
@@ -419,6 +451,8 @@ export function App() {
   const sandboxId = sandboxTarget?.id ?? null;
   const usesDetails =
     page.kind === "sandbox" ||
+    page.kind === "resize" ||
+    page.kind === "lifecycle" ||
     page.kind === "ssh-details" ||
     page.kind === "setup-ssh" ||
     page.kind === "ssh-include" ||
@@ -527,12 +561,16 @@ export function App() {
   const refreshDirectSshState = useCallback(
     async (id: string, checkRunning: boolean): Promise<void> => {
       try {
-        const [keyAvailable, block, includePresent, sshdRunning] = await Promise.all([
+        const [keyAvailable, block, includePresent] = await Promise.all([
           directKeyExists(id),
           readDirectSshConfigBlock(id),
           hasSshInclude(),
-          checkRunning && api ? isSshdRunning(api, id).catch(() => false) : Promise.resolve(false),
         ]);
+        // The check runs a command in the sandbox, which counts as activity and
+        // would hold off idle auto-stop, so it only runs when SSH is set up and
+        // a caller needs the answer.
+        const sshdRunning =
+          checkRunning && block && api ? await isSshdRunning(api, id).catch(() => false) : false;
         setDirectInfo({ keyAvailable, block, includePresent, sshdRunning });
       } catch {
         setDirectInfo({
@@ -842,13 +880,14 @@ export function App() {
     setSshKeySelected(0);
   }, [sandboxId]);
 
+  const onSshSettings = page.kind === "ssh-details";
   useEffect(() => {
     if (!pageDetails) {
       setDirectInfo(null);
       return;
     }
-    void refreshDirectSshState(pageDetails.id, pageDetails.status === "started");
-  }, [pageDetails, refreshDirectSshState]);
+    void refreshDirectSshState(pageDetails.id, onSshSettings && pageDetails.status === "started");
+  }, [pageDetails, onSshSettings, refreshDirectSshState]);
 
   useEffect(() => {
     if (!sandboxId || (page.kind !== "ssh-details" && page.kind !== "remove-ssh-key")) {
@@ -1018,6 +1057,10 @@ export function App() {
         return buildSnapshotListActions();
       case "sandbox":
         return buildSandboxPageActions(ctx);
+      case "resize":
+        return buildResizeActions();
+      case "lifecycle":
+        return buildLifecycleActions();
       case "snapshot":
         return buildSnapshotPageActions();
       case "delete-snapshot":
@@ -1157,6 +1200,30 @@ export function App() {
       case "restart":
         runLifecycle("restart");
         return;
+      case "resize": {
+        const target = actionTarget();
+        if (target && pageDetails) {
+          setResizeValues(resizeValuesFromDetails(pageDetails));
+          setResizeFocus("size");
+          setResizeError(null);
+          pushSandboxScoped({ kind: "resize", ...target });
+        }
+        return;
+      }
+      case "lifecycle": {
+        const target = actionTarget();
+        if (target && pageDetails) {
+          const values = lifecycleFormFromDetails(pageDetails.lifecycle);
+          if (!restartOnFailureAllowed(pageDetails.runtime)) {
+            values.restartOnFailure = false;
+          }
+          setLifecycleValues(values);
+          setLifecycleFocus("stop-idle");
+          setLifecycleError(null);
+          pushSandboxScoped({ kind: "lifecycle", ...target });
+        }
+        return;
+      }
       case "ssh":
         void connectSsh();
         return;
@@ -1768,32 +1835,10 @@ export function App() {
   }
 
   function launchVSCode(sandboxId: string, directory: string): void {
-    const alias = getDirectSshAlias(sandboxId);
-    const url = `vscode://vscode-remote/ssh-remote+${alias}${remotePathForUrl(directory)}`;
-    const win = process.platform === "win32";
-    // On Windows `code` is a .cmd shim that needs a shell and breaks on paths with
-    // spaces, so the vscode:// URL (no cmd metacharacters) goes through `start`.
-    const code = win ? null : Bun.which("code");
-    const command = code ?? (win ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open");
-    const args = code
-      ? ["--remote", `ssh-remote+${alias}`, directory]
-      : win
-        ? ["/d", "/c", "start", "", url]
-        : [url];
-    try {
-      const child = spawn(command, args, {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      child.once("error", (error) => {
-        showToast("error", `Could not open VS Code: ${describeError(error)}`);
-      });
-      child.unref();
-      showToast("info", "Opening VS Code. The Remote - SSH extension is required.");
-    } catch (error) {
-      showToast("error", `Could not open VS Code: ${describeError(error)}`);
-    }
+    openInVscode(sandboxId, directory).then(
+      () => showToast("info", "Opening VS Code. The Remote - SSH extension is required."),
+      (error: unknown) => showToast("error", describeError(error)),
+    );
   }
 
   async function copySshCommand(): Promise<void> {
@@ -2005,6 +2050,12 @@ export function App() {
       case "new-sandbox":
         void submitCreate();
         return;
+      case "resize":
+        void submitResize();
+        return;
+      case "lifecycle":
+        void submitLifecycle();
+        return;
       case "new-snapshot":
         void submitNewSnapshot();
         return;
@@ -2110,6 +2161,10 @@ export function App() {
       if (size.diskGB !== undefined) {
         input.diskGB = size.diskGB;
       }
+      const lifecycle = createLifecycleInput(createValues);
+      if (lifecycle !== undefined) {
+        input.lifecycle = lifecycle;
+      }
 
       switch (createValues.imageSource) {
         case "dockerfile":
@@ -2177,6 +2232,72 @@ export function App() {
       );
     } catch (error) {
       setCreateError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitResize(): Promise<void> {
+    if (!api || page.kind !== "resize" || busyMessage || !resizeValues) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target) {
+      return;
+    }
+    setResizeError(null);
+
+    let input: ReturnType<typeof resizeSizeInput>;
+    try {
+      input = resizeSizeInput(resizeValues);
+      if (input.cpu === undefined && input.memoryMB === undefined && input.diskGB === undefined) {
+        throw new Error("Enter a CPU, memory or disk size.");
+      }
+    } catch (error) {
+      setResizeError(describeError(error));
+      return;
+    }
+
+    setBusyMessage(`Resizing ${target.label}…`);
+    try {
+      await api.resize(target.id, input);
+      await loadDetails(target.id);
+      await refreshList(false);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Resized ${target.label}.`);
+    } catch (error) {
+      setResizeError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitLifecycle(): Promise<void> {
+    if (!api || page.kind !== "lifecycle" || busyMessage || !lifecycleValues) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target) {
+      return;
+    }
+    const validation = validateLifecycleForm(lifecycleValues);
+    if (validation) {
+      setLifecycleError(validation);
+      return;
+    }
+
+    setLifecycleError(null);
+    setBusyMessage(`Saving lifecycle for ${target.label}…`);
+    try {
+      await api.updateLifecycle(target.id, lifecycleUpdateInput(lifecycleValues));
+      await loadDetails(target.id);
+      await refreshList(false);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Updated the lifecycle for ${target.label}.`);
+    } catch (error) {
+      setLifecycleError(describeError(error));
     } finally {
       setBusyMessage(null);
     }
@@ -2585,6 +2706,7 @@ export function App() {
           }));
           return;
         case "size":
+        case "stop-idle":
           return;
         case "size-cpu":
         case "size-memory": {
@@ -2616,6 +2738,33 @@ export function App() {
         case "submit":
           return;
       }
+    }
+    if (page.kind === "resize" && resizeValues) {
+      if (resizeFocus === "size-cpu" || resizeFocus === "size-memory") {
+        const field = resizeFocus === "size-cpu" ? "customCpu" : "customMemoryGB";
+        const merged = `${resizeValues[field]}${text}`.replace(/[^\d.]/g, "");
+        const [whole = "", ...rest] = merged.split(".");
+        setResizeValues((previous) =>
+          previous
+            ? {
+                ...previous,
+                [field]: rest.length > 0 ? `${whole}.${rest.join("")}` : whole,
+              }
+            : previous,
+        );
+        return;
+      }
+      if (resizeFocus === "size-disk") {
+        const digits = text.replace(/\D/g, "");
+        if (digits) {
+          setResizeValues((previous) =>
+            previous
+              ? { ...previous, customDiskGB: appendText(previous.customDiskGB, digits) }
+              : previous,
+          );
+        }
+      }
+      return;
     }
     if (page.kind === "create-snapshot") {
       if (createSnapshotFocus === "name") {
@@ -2855,6 +3004,149 @@ export function App() {
         return (next + authorizedKeys.length) % authorizedKeys.length;
       });
       return;
+    }
+
+    if (page.kind === "lifecycle" && lifecycleValues) {
+      const backward =
+        key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift);
+      if (
+        key.name === "down" ||
+        key.name === "up" ||
+        key.name === "tab" ||
+        key.name === "backtab"
+      ) {
+        setLifecycleFocus((current) =>
+          nextLifecycleFocus(lifecycleValues, pageDetails?.runtime, current, backward ? -1 : 1),
+        );
+        return;
+      }
+      if (key.name === "left" || key.name === "right") {
+        const delta = key.name === "left" ? -1 : 1;
+        if (lifecycleFocus === "stop-idle") {
+          const choices = choicesWithCurrent(STOP_IDLE_CHOICES, lifecycleValues.stopIdleMS);
+          const next = moveLifecycleChoice(choices, lifecycleValues.stopIdleMS, delta);
+          setLifecycleValues((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  stopIdleMS: next,
+                  ...(next === undefined ? { serverless: false } : {}),
+                }
+              : previous,
+          );
+          return;
+        }
+        if (lifecycleFocus === "delete-idle") {
+          const choices = choicesWithCurrent(DELETE_IDLE_CHOICES, lifecycleValues.deleteIdleMS);
+          const next = moveLifecycleChoice(choices, lifecycleValues.deleteIdleMS, delta);
+          setLifecycleValues((previous) =>
+            previous ? { ...previous, deleteIdleMS: next } : previous,
+          );
+          return;
+        }
+        if (lifecycleFocus === "restart" && restartOnFailureAllowed(pageDetails?.runtime)) {
+          setLifecycleValues((previous) =>
+            previous ? { ...previous, restartOnFailure: !previous.restartOnFailure } : previous,
+          );
+          return;
+        }
+        if (lifecycleFocus === "serverless" && lifecycleValues.stopIdleMS !== undefined) {
+          setLifecycleValues((previous) =>
+            previous ? { ...previous, serverless: !previous.serverless } : previous,
+          );
+          return;
+        }
+      }
+      if (
+        (key.name === "return" || key.name === "space") &&
+        (lifecycleFocus === "restart" || lifecycleFocus === "serverless")
+      ) {
+        if (lifecycleFocus === "restart" && restartOnFailureAllowed(pageDetails?.runtime)) {
+          setLifecycleValues((previous) =>
+            previous ? { ...previous, restartOnFailure: !previous.restartOnFailure } : previous,
+          );
+        } else if (lifecycleFocus === "serverless" && lifecycleValues.stopIdleMS !== undefined) {
+          setLifecycleValues((previous) =>
+            previous ? { ...previous, serverless: !previous.serverless } : previous,
+          );
+        }
+        return;
+      }
+      if (key.name === "return" && lifecycleFocus !== "submit") {
+        setLifecycleFocus((current) =>
+          nextLifecycleFocus(lifecycleValues, pageDetails?.runtime, current, 1),
+        );
+        return;
+      }
+    }
+
+    if (page.kind === "resize" && resizeValues) {
+      const backward =
+        key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift);
+      if (
+        key.name === "down" ||
+        key.name === "up" ||
+        key.name === "tab" ||
+        key.name === "backtab"
+      ) {
+        setResizeFocus((current) => nextResizeFocus(resizeValues, current, backward ? -1 : 1));
+        return;
+      }
+      if (resizeFocus === "size" && (key.name === "left" || key.name === "right")) {
+        setResizeValues((previous) =>
+          previous
+            ? { ...previous, size: moveSize(previous.size, key.name === "left" ? -1 : 1) }
+            : previous,
+        );
+        return;
+      }
+      if (key.name === "return" && resizeFocus !== "submit") {
+        setResizeFocus((current) => nextResizeFocus(resizeValues, current, 1));
+        return;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        const field =
+          resizeFocus === "size-cpu"
+            ? "customCpu"
+            : resizeFocus === "size-memory"
+              ? "customMemoryGB"
+              : resizeFocus === "size-disk"
+                ? "customDiskGB"
+                : null;
+        if (field) {
+          setResizeValues((previous) =>
+            previous ? { ...previous, [field]: removeLastChar(previous[field]) } : previous,
+          );
+          return;
+        }
+      }
+      if (resizeFocus !== "submit") {
+        const char = printableChar(key);
+        if (!char) {
+          return;
+        }
+        if (resizeFocus === "size-cpu" || resizeFocus === "size-memory") {
+          const field = resizeFocus === "size-cpu" ? "customCpu" : "customMemoryGB";
+          const value = resizeValues[field];
+          if (/^\d$/.test(char) || (char === "." && !value.includes("."))) {
+            setResizeValues((previous) =>
+              previous ? { ...previous, [field]: appendText(value, char) } : previous,
+            );
+          }
+          return;
+        }
+        if (resizeFocus === "size-disk") {
+          if (/^\d$/.test(char)) {
+            setResizeValues((previous) =>
+              previous
+                ? { ...previous, customDiskGB: appendText(previous.customDiskGB, char) }
+                : previous,
+            );
+          }
+          return;
+        }
+        return;
+      }
     }
 
     if (
@@ -3158,6 +3450,16 @@ export function App() {
           setCreateValues((previous) => ({
             ...previous,
             size: moveSize(previous.size, key.name === "left" ? -1 : 1),
+          }));
+        }
+        return;
+      }
+
+      if (createFocus === "stop-idle") {
+        if (key.name === "left" || key.name === "right") {
+          setCreateValues((previous) => ({
+            ...previous,
+            stopIdle: toggleStopIdle(previous.stopIdle, key.name === "left" ? -1 : 1),
           }));
         }
         return;
@@ -3601,8 +3903,56 @@ export function App() {
         extra.push(["enter", "newline"]);
       } else if (createFocus === "size") {
         extra.push(["←/→", "preset"]);
+      } else if (createFocus === "stop-idle") {
+        extra.push(["←/→", "idle time"], ["enter", "next field"]);
       } else {
         extra.push(["enter", "next field"]);
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
+    }
+    if (page.kind === "lifecycle") {
+      if (lifecycleFocus === "submit") {
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
+      }
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+        ["←/→", "change"],
+      ];
+      if (lifecycleFocus === "restart" || lifecycleFocus === "serverless") {
+        extra.push(["enter", "toggle"], ["space", "toggle"]);
+      } else {
+        extra.push(["enter", "next field"]);
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
+    }
+    if (page.kind === "resize") {
+      if (resizeFocus === "submit") {
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
+      }
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+        ["enter", "next field"],
+      ];
+      if (resizeFocus === "size") {
+        extra.push(["←/→", "preset"]);
       }
       return actionHints(
         actions.filter((action) => action.id !== "submit"),
@@ -3666,6 +4016,8 @@ export function App() {
     newSnapshotFocus,
     createValues.dockerfileMode,
     newSnapshotValues.dockerfileMode,
+    lifecycleFocus,
+    resizeFocus,
   ]);
 
   if (booting) {
@@ -3720,6 +4072,43 @@ export function App() {
           selectedIndex={selectedActionIndex}
         />
       );
+      break;
+    case "resize":
+      content =
+        pageDetails && resizeValues ? (
+          <ResizeScreen
+            label={page.label}
+            values={resizeValues}
+            focus={resizeFocus}
+            error={resizeError}
+          />
+        ) : (
+          <LoadingPanel
+            loading={detailsLoading}
+            error={detailsError}
+            title="Resize"
+            fallback="The sandbox details are unavailable."
+          />
+        );
+      break;
+    case "lifecycle":
+      content =
+        pageDetails && lifecycleValues ? (
+          <LifecycleScreen
+            label={page.label}
+            values={lifecycleValues}
+            focus={lifecycleFocus}
+            runtime={pageDetails.runtime}
+            error={lifecycleError}
+          />
+        ) : (
+          <LoadingPanel
+            loading={detailsLoading}
+            error={detailsError}
+            title="Lifecycle"
+            fallback="The sandbox details are unavailable."
+          />
+        );
       break;
     case "ssh-details":
       content =

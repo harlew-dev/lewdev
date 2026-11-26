@@ -7,6 +7,7 @@ import {
   CREATE_DEFAULT,
   type CreateFormValues,
   createFocusOrder,
+  createLifecycleInput,
   createSizeInput,
   createSizeSummary,
   dockerfileFieldValue,
@@ -27,7 +28,9 @@ import {
   selectSnapshotOption,
   SIZE_PRESETS,
   snapshotOptionIndex,
+  STOP_IDLE_CHOICES,
   toggleDockerfileMode,
+  toggleStopIdle,
 } from "../src/create-form";
 
 function values(overrides: Partial<CreateFormValues> = {}): CreateFormValues {
@@ -116,9 +119,39 @@ describe("size choices", () => {
   });
 });
 
+describe("idle stop choice", () => {
+  test("defaults to off and sends no lifecycle", () => {
+    expect(CREATE_DEFAULT.stopIdle).toBe("off");
+    expect(createLifecycleInput(values())).toBeUndefined();
+  });
+
+  test("offers the fixed durations and maps each to milliseconds", () => {
+    expect(STOP_IDLE_CHOICES.map((choice) => choice.label)).toEqual([
+      "Off",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "4h",
+    ]);
+    expect(createLifecycleInput(values({ stopIdle: "30m" }))).toEqual({
+      stopIfIdleForMS: 30 * 60 * 1000,
+    });
+    expect(createLifecycleInput(values({ stopIdle: "4h" }))).toEqual({
+      stopIfIdleForMS: 4 * 60 * 60 * 1000,
+    });
+  });
+
+  test("moves through the choices and wraps", () => {
+    expect(toggleStopIdle("off", 1)).toBe("15m");
+    expect(toggleStopIdle("4h", 1)).toBe("off");
+    expect(toggleStopIdle("off", -1)).toBe("4h");
+  });
+});
+
 describe("focus order", () => {
-  test("visits image, size and name for presets", () => {
-    expect(createFocusOrder(values())).toEqual(["image", "size", "name", "submit"]);
+  test("visits image, size, idle stop and name for presets", () => {
+    expect(createFocusOrder(values())).toEqual(["image", "size", "stop-idle", "name", "submit"]);
   });
 
   test("adds the image sub-field when a custom image or Dockerfile is picked", () => {
@@ -126,6 +159,7 @@ describe("focus order", () => {
       "image",
       "image-ref",
       "size",
+      "stop-idle",
       "name",
       "submit",
     ]);
@@ -134,6 +168,7 @@ describe("focus order", () => {
       "image-dockerfile-mode",
       "image-dockerfile",
       "size",
+      "stop-idle",
       "name",
       "submit",
     ]);
@@ -141,6 +176,7 @@ describe("focus order", () => {
       "image",
       "image-snapshot",
       "size",
+      "stop-idle",
       "name",
       "submit",
     ]);
@@ -159,10 +195,12 @@ describe("focus order", () => {
       "size-cpu",
       "size-memory",
       "size-disk",
+      "stop-idle",
       "name",
       "submit",
     ]);
     expect(nextCreateFocus(custom, "size", 1)).toBe("size-cpu");
+    expect(nextCreateFocus(custom, "stop-idle", 1)).toBe("name");
     expect(nextCreateFocus(custom, "name", 1)).toBe("submit");
     expect(nextCreateFocus(custom, "submit", 1)).toBe("image");
     expect(nextCreateFocus(custom, "image", -1)).toBe("submit");

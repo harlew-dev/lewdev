@@ -7,6 +7,7 @@ export type {
   ExposedPortInfo,
   PortVisibility,
   RegisterSnapshotInput,
+  ResizeSandboxInput,
   SandboxDetails,
   SandboxExecResult,
   SandboxExecStreamHandle,
@@ -15,7 +16,9 @@ export type {
   SandboxFileInfo,
   SandboxFileList,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxRuntime,
+  SandboxStatusReason,
   SdkSandbox,
   SnapshotInfo,
   TeamQuotaInfo,
@@ -35,6 +38,11 @@ export {
   saveConfig,
 } from "./config.js";
 export { describeError } from "./errors.js";
+export type { CliOutput, SandboxCommand } from "./cli.js";
+export { formatSandboxTable, isSandboxCommand, runSandboxCli } from "./cli.js";
+export { resolveSandbox, SandboxResolutionError } from "./sandbox-resolve.js";
+export type { VscodeLaunch } from "./vscode.js";
+export { openInVscode, vscodeLaunchCommand } from "./vscode.js";
 export type { SshProxyIo } from "./ssh-proxy.js";
 export { runSshProxy } from "./ssh-proxy.js";
 export {

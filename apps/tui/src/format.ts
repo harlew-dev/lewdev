@@ -1,3 +1,5 @@
+import type { SandboxRuntime } from "@lewdev/core";
+
 export function shortId(id: string): string {
   return id.length > 11 ? id.slice(0, 11) : id;
 }
@@ -75,6 +77,47 @@ export function formatMemory(memoryMB: number): string {
 
 export function formatDisk(diskGB: number): string {
   return `${diskGB} GB`;
+}
+
+/** Human-readable lifecycle duration; empty and invalid values show a dash. */
+export function formatDurationMS(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "—";
+  }
+  const second = 1000;
+  const minute = 60 * second;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (ms % day === 0) {
+    return `${ms / day}d`;
+  }
+  if (ms % hour === 0) {
+    return `${ms / hour}h`;
+  }
+  if (ms % minute === 0) {
+    return `${ms / minute}m`;
+  }
+  return `${Math.round(ms / second)}s`;
+}
+
+/** Friendly name for an SDK runtime value; an empty value is the server default. */
+export function runtimeLabel(runtime?: SandboxRuntime | ""): string {
+  switch (runtime) {
+    case "docker":
+      return "Docker";
+    case "gvisor":
+      return "gVisor";
+    case "kata":
+      return "Kata";
+    case "firecracker":
+      return "Firecracker";
+    case "wasm":
+      return "WASM";
+    case "isolate":
+      return "Isolate";
+    default:
+      return "default";
+  }
 }
 
 /** Display label for a sandbox status; the API's raw values stay untouched elsewhere. */

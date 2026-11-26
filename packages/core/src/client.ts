@@ -14,10 +14,12 @@ import {
   type GetOptions,
   type HealthStatus,
   Image,
+  type Lifecycle,
   type ListOptions,
   type ListSnapshotsOptions,
   MicroVM,
   type RegisterSnapshotOptions,
+  type ResizeOptions,
   type SandboxSnapshot,
   type SandboxStatus,
   type SnapshotList,
@@ -60,6 +62,44 @@ export interface SdkExecStreamHandle {
 /** A sandbox execution runtime; WASM and isolate sandboxes have no shell. */
 export type SandboxRuntime = "docker" | "gvisor" | "kata" | "firecracker" | "wasm" | "isolate";
 
+/** Why the server put the sandbox in its current status. */
+export type SandboxStatusReason =
+  | "user_stop"
+  | "idle"
+  | "max_age"
+  | "out_of_memory"
+  | "disk_limit"
+  | "crashed"
+  | "reconcile"
+  | "program_exited"
+  | "failover"
+  | "restarted"
+  | "failover_disabled"
+  | "ownership_lease_expired";
+
+/**
+ * A sandbox's automatic stop/delete settings. Durations are milliseconds;
+ * the SDK boundary converts them to integer nanoseconds.
+ */
+export interface SandboxLifecycle {
+  stopIfIdleForMS?: number;
+  destroyIfIdleForMS?: number;
+  stopAtAgeMS?: number;
+  destroyAtAgeMS?: number;
+  destroyAfterExitForMS?: number;
+  /** Resume on the next HTTP request after an idle stop. Requires `stopIfIdleForMS`. */
+  serverless?: boolean;
+  /** Docker, gVisor and containerd only. */
+  restartOnFailure?: boolean;
+}
+
+/** The CPU, memory and disk sizes a resize may change. */
+export interface ResizeSandboxInput {
+  cpu?: number;
+  memoryMB?: number;
+  diskGB?: number;
+}
+
 /** The subset of the SDK's sandbox resource that lewdev uses. */
 export interface SdkSandbox {
   id: string;
@@ -78,6 +118,10 @@ export interface SdkSandbox {
   sshPrivateKey?: string;
   exposedPorts?: SdkExposedPort[];
   lastError?: string;
+  statusReason?: SandboxStatusReason;
+  exitCode?: number;
+  lifecycle: Lifecycle;
+  tags?: Record<string, string>;
   runtime?: SandboxRuntime | "";
   exposePort(port: number, options?: ExposePortOptions, call?: CallOptions): Promise<ExposeResult>;
   unexposePort(port: number, call?: CallOptions): Promise<void>;
@@ -101,6 +145,8 @@ export interface AerolSdk {
   start(id: string, call?: CallOptions): Promise<SdkSandbox>;
   stop(id: string, call?: CallOptions): Promise<SdkSandbox>;
   destroy(id: string, call?: CallOptions): Promise<void>;
+  resize(id: string, options: ResizeOptions, call?: CallOptions): Promise<SdkSandbox>;
+  updateLifecycle(id: string, lifecycle: Lifecycle, call?: CallOptions): Promise<SdkSandbox>;
   health(call?: CallOptions): Promise<HealthStatus>;
   createSnapshot(
     id: string,
@@ -140,6 +186,7 @@ export interface SandboxInfo {
   publicURL: string;
   exposedPorts: ExposedPortInfo[];
   lastError?: string;
+  runtime?: SandboxRuntime | "";
 }
 
 export interface SandboxDetails extends SandboxInfo {
@@ -147,7 +194,10 @@ export interface SandboxDetails extends SandboxInfo {
   updatedAt: string;
   lastActiveAt: string;
   sshPublicKey?: string;
-  runtime?: SandboxRuntime | "";
+  statusReason?: SandboxStatusReason;
+  exitCode?: number;
+  lifecycle: SandboxLifecycle;
+  tags: Record<string, string>;
 }
 
 export interface CreateSandboxInput {
@@ -159,6 +209,7 @@ export interface CreateSandboxInput {
   cpu?: number;
   memoryMB?: number;
   diskGB?: number;
+  lifecycle?: SandboxLifecycle;
 }
 
 export interface SandboxExecResult {
@@ -317,6 +368,69 @@ function toExposedPort(port: SdkExposedPort): ExposedPortInfo {
   };
 }
 
+const NANOSECONDS_PER_MILLISECOND = 1_000_000;
+
+function durationToNanoseconds(ms: number): number {
+  if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms <= 0) {
+    throw new Error(`Durations must be positive whole milliseconds (got ${ms}).`);
+  }
+  return ms * NANOSECONDS_PER_MILLISECOND;
+}
+
+function durationToMilliseconds(ns: number): number {
+  return Math.round(ns / NANOSECONDS_PER_MILLISECOND);
+}
+
+function toSdkLifecycle(lifecycle: SandboxLifecycle): Lifecycle {
+  const result: Lifecycle = {};
+  if (lifecycle.stopIfIdleForMS !== undefined) {
+    result.stopIfIdleFor = durationToNanoseconds(lifecycle.stopIfIdleForMS);
+  }
+  if (lifecycle.destroyIfIdleForMS !== undefined) {
+    result.destroyIfIdleFor = durationToNanoseconds(lifecycle.destroyIfIdleForMS);
+  }
+  if (lifecycle.stopAtAgeMS !== undefined) {
+    result.stopAtAge = durationToNanoseconds(lifecycle.stopAtAgeMS);
+  }
+  if (lifecycle.destroyAtAgeMS !== undefined) {
+    result.destroyAtAge = durationToNanoseconds(lifecycle.destroyAtAgeMS);
+  }
+  if (lifecycle.destroyAfterExitForMS !== undefined) {
+    result.destroyAfterExitFor = durationToNanoseconds(lifecycle.destroyAfterExitForMS);
+  }
+  if (lifecycle.serverless !== undefined) {
+    result.serverless = lifecycle.serverless;
+  }
+  if (lifecycle.restartOnFailure !== undefined) {
+    result.restartOnFailure = lifecycle.restartOnFailure;
+  }
+  return result;
+}
+
+function toLifecycle(lifecycle: Lifecycle): SandboxLifecycle {
+  return {
+    ...(lifecycle.stopIfIdleFor === undefined
+      ? {}
+      : { stopIfIdleForMS: durationToMilliseconds(lifecycle.stopIfIdleFor) }),
+    ...(lifecycle.destroyIfIdleFor === undefined
+      ? {}
+      : { destroyIfIdleForMS: durationToMilliseconds(lifecycle.destroyIfIdleFor) }),
+    ...(lifecycle.stopAtAge === undefined
+      ? {}
+      : { stopAtAgeMS: durationToMilliseconds(lifecycle.stopAtAge) }),
+    ...(lifecycle.destroyAtAge === undefined
+      ? {}
+      : { destroyAtAgeMS: durationToMilliseconds(lifecycle.destroyAtAge) }),
+    ...(lifecycle.destroyAfterExitFor === undefined
+      ? {}
+      : { destroyAfterExitForMS: durationToMilliseconds(lifecycle.destroyAfterExitFor) }),
+    ...(lifecycle.serverless === undefined ? {} : { serverless: lifecycle.serverless }),
+    ...(lifecycle.restartOnFailure === undefined
+      ? {}
+      : { restartOnFailure: lifecycle.restartOnFailure }),
+  };
+}
+
 function toInfo(sandbox: SdkSandbox): SandboxInfo {
   const name = sandbox.name?.trim();
   return {
@@ -331,6 +445,7 @@ function toInfo(sandbox: SdkSandbox): SandboxInfo {
     publicURL: sandbox.publicURL,
     exposedPorts: (sandbox.exposedPorts ?? []).map(toExposedPort),
     lastError: sandbox.lastError,
+    ...(sandbox.runtime === undefined ? {} : { runtime: sandbox.runtime }),
   };
 }
 
@@ -341,7 +456,10 @@ function toDetails(sandbox: SdkSandbox): SandboxDetails {
     updatedAt: sandbox.updatedAt,
     lastActiveAt: sandbox.lastActiveAt,
     sshPublicKey: sandbox.sshPublicKey,
-    ...(sandbox.runtime === undefined ? {} : { runtime: sandbox.runtime }),
+    ...(sandbox.statusReason === undefined ? {} : { statusReason: sandbox.statusReason }),
+    ...(sandbox.exitCode === undefined ? {} : { exitCode: sandbox.exitCode }),
+    lifecycle: toLifecycle(sandbox.lifecycle ?? {}),
+    tags: { ...(sandbox.tags ?? {}) },
   };
 }
 
@@ -406,6 +524,9 @@ export class LewdevApi {
     if (input.diskGB !== undefined) {
       options.diskGB = input.diskGB;
     }
+    if (input.lifecycle !== undefined) {
+      options.lifecycle = toSdkLifecycle(input.lifecycle);
+    }
 
     const sandbox = await this.sdk.create(options);
     const privateKey = sandbox.sshPrivateKey?.trim() ? sandbox.sshPrivateKey : undefined;
@@ -428,6 +549,26 @@ export class LewdevApi {
 
   async destroySandbox(id: string): Promise<void> {
     await this.sdk.destroy(id);
+  }
+
+  /** Changes CPU, memory or disk. Omitted dimensions keep their current value. */
+  async resize(id: string, input: ResizeSandboxInput): Promise<SandboxDetails> {
+    const options: ResizeOptions = {};
+    if (input.cpu !== undefined) {
+      options.cpu = input.cpu;
+    }
+    if (input.memoryMB !== undefined) {
+      options.memoryMB = input.memoryMB;
+    }
+    if (input.diskGB !== undefined) {
+      options.diskGB = input.diskGB;
+    }
+    return toDetails(await this.sdk.resize(id, options));
+  }
+
+  /** Replaces every lifecycle timer; fields left out are turned off. */
+  async updateLifecycle(id: string, lifecycle: SandboxLifecycle): Promise<SandboxDetails> {
+    return toDetails(await this.sdk.updateLifecycle(id, toSdkLifecycle(lifecycle)));
   }
 
   async openPort(
