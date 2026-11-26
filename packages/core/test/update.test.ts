@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -258,7 +258,8 @@ describe("installUpdate", () => {
 
     const replaced = await installUpdate(Buffer.from("new"), link);
 
-    expect(replaced).toBe(target);
+    // macOS temp dirs live under a symlink (/var -> /private/var).
+    expect(replaced).toBe(await realpath(target));
     expect(await readFile(target, "utf8")).toBe("new");
     expect((await stat(target)).mode & 0o777).toBe(0o755);
     expect((await stat(link)).isFile()).toBe(true);
