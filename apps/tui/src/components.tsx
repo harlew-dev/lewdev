@@ -1,10 +1,12 @@
+import type { UsageMetric, UsageSummary } from "@lewdev/core";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
 import type { ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
 import type { ActionGroup, ActionHint, PageAction } from "./actions";
-import { shortStatus } from "./format";
+import { dockerfilePreviewLines, pastedDockerfileLines } from "./create-form";
+import { shortStatus, truncate } from "./format";
 import { colors, statusColor, statusTint, tints, type ToastTint } from "./theme";
 
 export type ToastKind = "success" | "error" | "warning" | "info";
@@ -205,6 +207,80 @@ export function Field({
   );
 }
 
+export function SegmentedRow({
+  label,
+  options,
+  selected,
+  active,
+}: {
+  label: string;
+  options: ReadonlyArray<{ id: string; label: string }>;
+  selected: string;
+  active: boolean;
+}) {
+  return (
+    <box flexDirection="row" flexShrink={0} gap={1} alignItems="center">
+      <box width={14} flexShrink={0}>
+        <text fg={active ? colors.accent : colors.muted}>{label}</text>
+      </box>
+      {options.map((option) => {
+        const isSelected = option.id === selected;
+        return (
+          <box
+            key={option.id}
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={isSelected ? colors.selection : colors.panelAlt}
+          >
+            <text fg={isSelected ? colors.accent : colors.muted}>{option.label}</text>
+          </box>
+        );
+      })}
+      <text fg={colors.muted}>←/→</text>
+    </box>
+  );
+}
+
+export function DockerfileContents({ contents, active }: { contents: string; active: boolean }) {
+  const lines = dockerfilePreviewLines(contents);
+  const count = pastedDockerfileLines(contents);
+  const occurrences = new Map<string, number>();
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      <box
+        border
+        borderStyle="rounded"
+        borderColor={active ? colors.accent : colors.border}
+        title="Contents"
+        titleColor={active ? colors.accent : colors.muted}
+        backgroundColor={colors.panel}
+        flexDirection="column"
+        flexShrink={0}
+        overflow="hidden"
+        paddingLeft={1}
+        paddingRight={1}
+        paddingTop={1}
+        paddingBottom={1}
+      >
+        {lines.length === 0 ? (
+          <text fg={colors.muted}>paste or type a Dockerfile</text>
+        ) : (
+          lines.map((line) => {
+            const occurrence = occurrences.get(line) ?? 0;
+            occurrences.set(line, occurrence + 1);
+            return (
+              <text key={`${line}:${occurrence}`} fg={colors.text} wrapMode="none">
+                {line.length > 0 ? line : " "}
+              </text>
+            );
+          })
+        )}
+      </box>
+      <text fg={colors.muted}>{plural(count, "line", "lines")}</text>
+    </box>
+  );
+}
+
 export function FormButton({ label, active }: { label: string; active: boolean }) {
   return (
     <box
@@ -230,6 +306,161 @@ export function StatusText({ status, label }: { status: string; label?: string }
       backgroundColor={statusTint(status)}
     >
       <text fg={statusColor(status)}>● {label ?? shortStatus(status)}</text>
+    </box>
+  );
+}
+
+function usageGigabytes(memoryMB: number): string {
+  const gb = memoryMB / 1024;
+  return Number.isInteger(gb) ? String(gb) : String(Number(gb.toFixed(1)));
+}
+
+function metricColor(metric: UsageMetric): string {
+  if (metric.level === "error") {
+    return colors.error;
+  }
+  if (metric.level === "warning") {
+    return colors.warning;
+  }
+  return colors.muted;
+}
+
+function metricText(
+  metric: UsageMetric,
+  suffix: string,
+  format: (value: number) => string,
+): string {
+  const used = format(metric.used);
+  return metric.limit === undefined
+    ? `${used} ${suffix}`
+    : `${used}/${format(metric.limit)} ${suffix}`;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+const USAGE_SEPARATOR = " · ";
+const TEAM_MAX = 24;
+
+export function UsageBar({
+  summary,
+  updateVersion,
+}: {
+  summary: UsageSummary;
+  updateVersion?: string;
+}) {
+  const { width } = useTerminalDimensions();
+  const segments: Array<{ text: string; color: string }> = [];
+
+  if (summary.quota) {
+    const quota = summary.quota;
+    segments.push({
+      text: `${metricText(quota.sandboxes, "sandboxes", String)} (${summary.running} running)`,
+      color: metricColor(quota.sandboxes),
+    });
+    segments.push({
+      text: metricText(quota.cpu, "CPU", String),
+      color: metricColor(quota.cpu),
+    });
+    segments.push({
+      text: metricText(quota.memoryMB, "GB memory", usageGigabytes),
+      color: metricColor(quota.memoryMB),
+    });
+  } else {
+    segments.push({
+      text: `${plural(summary.sandboxes, "sandbox", "sandboxes")} (${summary.running} running)`,
+      color: colors.muted,
+    });
+    segments.push({ text: `${summary.cpu} CPU`, color: colors.muted });
+    segments.push({ text: `${usageGigabytes(summary.memoryMB)} GB memory`, color: colors.muted });
+  }
+  segments.push({ text: `${summary.diskGB} GB disk`, color: colors.muted });
+  if (summary.snapshots !== null) {
+    segments.push({
+      text: plural(summary.snapshots, "snapshot", "snapshots"),
+      color: colors.muted,
+    });
+  }
+
+  // Keep the bar on one line: drop the team first, then the update marker,
+  // then trailing segments.
+  const available = Math.max(0, width - 2);
+  const teamText = summary.team ? `team ${truncate(summary.team, TEAM_MAX)}` : "";
+  const updateText = updateVersion ? `↑ ${updateVersion}` : "";
+  const lengthOf = (list: typeof segments) =>
+    list.reduce((total, segment, index) => total + segment.text.length + (index > 0 ? 3 : 0), 0);
+  let shown = segments;
+  let showTeam = teamText.length > 0;
+  let showUpdate = updateText.length > 0;
+  const rightLength = () => {
+    let total = 0;
+    if (showUpdate) {
+      total += updateText.length;
+    }
+    if (showTeam) {
+      total += teamText.length + (showUpdate ? 1 : 0);
+    }
+    return total;
+  };
+  while (lengthOf(shown) + (rightLength() > 0 ? rightLength() + 2 : 0) > available) {
+    if (showTeam) {
+      showTeam = false;
+    } else if (showUpdate) {
+      showUpdate = false;
+    } else if (shown.length > 1) {
+      shown = shown.slice(0, -1);
+    } else {
+      break;
+    }
+  }
+
+  return (
+    <box flexDirection="row" justifyContent="space-between" flexShrink={0} height={1}>
+      <text wrapMode="none">
+        {shown.map((segment, index) => (
+          <span key={segment.text}>
+            <span fg={segment.color}>{segment.text}</span>
+            {index < shown.length - 1 ? <span fg={colors.muted}>{USAGE_SEPARATOR}</span> : null}
+          </span>
+        ))}
+      </text>
+      <box flexDirection="row" gap={1}>
+        {showUpdate ? (
+          <text fg={colors.accent} wrapMode="none">
+            {updateText}
+          </text>
+        ) : null}
+        {showTeam ? (
+          <text fg={colors.muted} wrapMode="none">
+            {teamText}
+          </text>
+        ) : null}
+      </box>
+    </box>
+  );
+}
+
+export function HomeTabs({ active }: { active: "sandboxes" | "snapshots" }) {
+  const tabs = [
+    { id: "sandboxes" as const, label: "Sandboxes" },
+    { id: "snapshots" as const, label: "Snapshots" },
+  ];
+  return (
+    <box flexDirection="row" flexShrink={0} gap={1}>
+      {tabs.map((tab) => {
+        const selected = tab.id === active;
+        return (
+          <box
+            key={tab.id}
+            paddingLeft={2}
+            paddingRight={2}
+            backgroundColor={selected ? colors.selection : colors.panelAlt}
+          >
+            <text fg={selected ? colors.accent : colors.muted}>{tab.label}</text>
+          </box>
+        );
+      })}
     </box>
   );
 }

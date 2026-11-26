@@ -1,0 +1,161 @@
+name: Release
+
+# Push an annotated tag like v0.2.0 (matching apps/tui/package.json) to build,
+# sign and upload a draft release.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: lewdev-linux-x64
+          - runner: ubuntu-24.04-arm
+            asset: lewdev-linux-arm64
+          - runner: macos-15
+            asset: lewdev-darwin-arm64
+          - runner: macos-15-intel
+            asset: lewdev-darwin-x64
+          - runner: windows-latest
+            asset: lewdev-windows-x64.exe
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.5
+
+      - name: Check the tag matches the package version
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(bun -e 'console.log((await Bun.file("apps/tui/package.json").json()).version)')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "Tag $TAG does not match apps/tui/package.json version $version" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Format, lint, typecheck and test
+        run: bun run check
+
+      - name: Build standalone binary
+        env:
+          OPENTUI_LIBC: glibc
+        run: bun run build
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [ -f dist/lewdev.exe ]; then
+            cp dist/lewdev.exe "out/${{ matrix.asset }}"
+          else
+            cp dist/lewdev "out/${{ matrix.asset }}"
+            chmod 0755 "out/${{ matrix.asset }}"
+          fi
+
+      # Apple Silicon only runs signed code. The builds are not notarised, so an
+      # ad-hoc signature is enough for curl and self-update installs.
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - "out/${{ matrix.asset }}"
+
+      - name: Smoke test
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          output="$("./out/${{ matrix.asset }}" --version | tr -d '\r')"
+          test "$output" = "lewdev ${TAG#v}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: out
+          pattern: lewdev-*
+          merge-multiple: true
+
+      - name: Write and sign checksums
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          SIGNING_KEY: ${{ secrets.LEWDEV_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "The LEWDEV_RELEASE_SIGNING_KEY secret is not set." >&2
+            exit 1
+          fi
+          cd out
+          assets=(lewdev-linux-x64 lewdev-linux-arm64 lewdev-darwin-arm64 lewdev-darwin-x64 lewdev-windows-x64.exe)
+          sha256sum "${assets[@]}" > SHA256SUMS
+          # Clients verify Ed25519 over "lewdev-release v<version>\n" + SHA256SUMS,
+          # which binds the version so an old release cannot be relabelled.
+          key="$RUNNER_TEMP/release-key.pem"
+          trap 'rm -f "$key" "$RUNNER_TEMP/signed-message"' EXIT
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
+          { printf 'lewdev-release %s\n' "$TAG"; cat SHA256SUMS; } > "$RUNNER_TEMP/signed-message"
+          openssl pkeyutl -sign -rawin -inkey "$key" \
+            -in "$RUNNER_TEMP/signed-message" -out SHA256SUMS.sig
+          openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/release-key.pub"
+          openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/release-key.pub" \
+            -in "$RUNNER_TEMP/signed-message" -sigfile SHA256SUMS.sig
+          cat SHA256SUMS
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # A draft with no notes: the release notes are written and applied by
+          # hand (`gh release edit --notes-file … --draft=false`) after the
+          # assets are checked.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --notes "" \
+            --title "$TAG" \
+            out/lewdev-linux-x64 out/lewdev-linux-arm64 \
+            out/lewdev-darwin-arm64 out/lewdev-darwin-x64 \
+            out/lewdev-windows-x64.exe \
+            out/SHA256SUMS out/SHA256SUMS.sig

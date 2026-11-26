@@ -2,14 +2,27 @@ import { describe, expect, test } from "bun:test";
 import type {
   CallOptions,
   CreateOptions,
+  CreateSnapshotOptions,
   ExposePortOptions,
   ExposeResult,
   HealthStatus,
   ListOptions,
+  ListSnapshotsOptions,
+  RegisterSnapshotOptions,
+  SandboxSnapshot,
+  SnapshotList,
+  TeamQuota,
+  WhoAmI,
 } from "@aerol-ai/aerolvm-sdk";
 import { Image } from "@aerol-ai/aerolvm-sdk";
 
-import { type AerolSdk, LewdevApi, type SandboxInfo, type SdkSandbox } from "../src/index.js";
+import {
+  type AerolSdk,
+  LewdevApi,
+  type SandboxInfo,
+  type SdkSandbox,
+  type SnapshotInfo,
+} from "../src/index.js";
 
 interface Call {
   method: string;
@@ -45,12 +58,33 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
   };
 }
 
+function snapshot(overrides: Partial<SandboxSnapshot> = {}): SandboxSnapshot {
+  return {
+    name: "base",
+    image: "ubuntu:24.04",
+    sourceSandboxID: "sb-0123456789abcdef",
+    createdAt,
+    ...overrides,
+  };
+}
+
 function fakeSdk(
   options: {
     create?: (options: CreateOptions) => SdkSandbox;
     list?: () => SdkSandbox[];
     get?: () => SdkSandbox;
     health?: HealthStatus;
+    createSnapshot?: (
+      id: string,
+      name: string,
+      snapshotOptions?: CreateSnapshotOptions,
+    ) => SandboxSnapshot;
+    registerSnapshot?: (snapshotOptions: RegisterSnapshotOptions) => SandboxSnapshot;
+    getSnapshot?: () => SandboxSnapshot;
+    listSnapshots?: (snapshotOptions?: ListSnapshotsOptions) => SnapshotList;
+    deleteSnapshot?: (name: string) => void;
+    whoami?: WhoAmI;
+    getTeamQuota?: (team: string) => TeamQuota;
   } = {},
 ): { sdk: AerolSdk; calls: Call[] } {
   const calls: Call[] = [];
@@ -89,6 +123,54 @@ function fakeSdk(
           caddy: "ok",
           sshGateway: "ok",
           version: "0.8.3",
+        }
+      );
+    },
+    createSnapshot: async (
+      id: string,
+      name: string,
+      snapshotOptions?: CreateSnapshotOptions,
+    ): Promise<SandboxSnapshot> => {
+      calls.push({ method: "createSnapshot", args: [id, name, snapshotOptions] });
+      return options.createSnapshot?.(id, name, snapshotOptions) ?? snapshot({ name });
+    },
+    registerSnapshot: async (
+      snapshotOptions: RegisterSnapshotOptions,
+    ): Promise<SandboxSnapshot> => {
+      calls.push({ method: "registerSnapshot", args: [snapshotOptions] });
+      return (
+        options.registerSnapshot?.(snapshotOptions) ?? snapshot({ name: snapshotOptions.name })
+      );
+    },
+    getSnapshot: async (name: string): Promise<SandboxSnapshot> => {
+      calls.push({ method: "getSnapshot", args: [name] });
+      return options.getSnapshot?.() ?? snapshot({ name });
+    },
+    listSnapshots: async (snapshotOptions?: ListSnapshotsOptions): Promise<SnapshotList> => {
+      calls.push({ method: "listSnapshots", args: [snapshotOptions] });
+      return options.listSnapshots?.(snapshotOptions) ?? { snapshots: [], hasMore: false };
+    },
+    deleteSnapshot: async (name: string): Promise<void> => {
+      calls.push({ method: "deleteSnapshot", args: [name] });
+      options.deleteSnapshot?.(name);
+    },
+    whoami: async (): Promise<WhoAmI> => {
+      calls.push({ method: "whoami", args: [] });
+      return (
+        options.whoami ?? {
+          principal: { kind: "token", id: "tok_test" },
+          role: "runner",
+        }
+      );
+    },
+    getTeamQuota: async (team: string): Promise<TeamQuota> => {
+      calls.push({ method: "getTeamQuota", args: [team] });
+      return (
+        options.getTeamQuota?.(team) ?? {
+          team,
+          generation: 1,
+          createdAt,
+          updatedAt: createdAt,
         }
       );
     },
@@ -255,5 +337,203 @@ describe("LewdevApi", () => {
     const health = await api.health();
     expect(health.version).toBe("0.8.3");
     expect(calls.map((call) => call.method)).toEqual(["health"]);
+  });
+});
+
+describe("LewdevApi snapshots", () => {
+  test("maps snapshot details and trims the requested name", async () => {
+    const { sdk, calls } = fakeSdk({
+      getSnapshot: () =>
+        snapshot({
+          name: "golden",
+          image: "ghcr.io/acme/base:1",
+          imageID: "sha256:abc",
+          cpu: 2,
+          gpu: 1,
+          memoryMB: 4096,
+          diskGB: 20,
+          regionID: "eu-1",
+          entrypoint: ["/bin/bash", "-lc"],
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    const info = await api.getSnapshot("  golden  ");
+    expect(calls[0]).toEqual({ method: "getSnapshot", args: ["golden"] });
+    expect(info).toEqual({
+      name: "golden",
+      image: "ghcr.io/acme/base:1",
+      imageID: "sha256:abc",
+      sourceSandboxID: "sb-0123456789abcdef",
+      createdAt,
+      entrypoint: ["/bin/bash", "-lc"],
+      regionID: "eu-1",
+      cpu: 2,
+      gpu: 1,
+      memoryMB: 4096,
+      diskGB: 20,
+    });
+  });
+
+  test("omits hint fields the server did not return", async () => {
+    const { sdk } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    const info: SnapshotInfo = await api.getSnapshot("base");
+    expect(info).not.toHaveProperty("imageID");
+    expect(info).not.toHaveProperty("cpu");
+    expect(info).not.toHaveProperty("memoryMB");
+    expect(info).not.toHaveProperty("regionID");
+  });
+
+  test("loads every snapshot page and stops on an empty page", async () => {
+    const { sdk, calls } = fakeSdk({
+      listSnapshots: (options) => {
+        if (options?.startingAfter === undefined) {
+          return {
+            snapshots: [snapshot({ name: "a" }), snapshot({ name: "b" })],
+            hasMore: true,
+          };
+        }
+        if (options.startingAfter === "b") {
+          return { snapshots: [snapshot({ name: "c" })], hasMore: true };
+        }
+        return { snapshots: [], hasMore: true };
+      },
+    });
+    const api = new LewdevApi(sdk);
+
+    const items = await api.listSnapshots();
+    expect(items.map((item) => item.name)).toEqual(["a", "b", "c"]);
+    expect(calls).toEqual([
+      { method: "listSnapshots", args: [undefined] },
+      { method: "listSnapshots", args: [{ startingAfter: "b" }] },
+      { method: "listSnapshots", args: [{ startingAfter: "c" }] },
+    ]);
+  });
+
+  test("creates a snapshot with the trimmed name and pause choice", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    const info = await api.createSnapshot("sb-1", "  golden  ", { allowPause: false });
+    expect(calls[0]).toEqual({
+      method: "createSnapshot",
+      args: ["sb-1", "golden", { allowPause: false }],
+    });
+    expect(info.name).toBe("golden");
+  });
+
+  test("registers from an image or Dockerfile with optional size hints", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.registerSnapshot({
+      name: "  base  ",
+      image: "  ubuntu:24.04  ",
+      cpu: 2,
+      memoryMB: 2048,
+      diskGB: 10,
+    });
+    expect(calls[0]).toEqual({
+      method: "registerSnapshot",
+      args: [
+        {
+          name: "base",
+          image: "ubuntu:24.04",
+          cpu: 2,
+          memoryMB: 2048,
+          diskGB: 10,
+        },
+      ],
+    });
+
+    await api.registerSnapshot({
+      name: "built",
+      dockerfile: "  FROM scratch\n",
+    });
+    expect(calls[1]).toEqual({
+      method: "registerSnapshot",
+      args: [{ name: "built", dockerfileContent: "FROM scratch" }],
+    });
+  });
+
+  test("requires exactly one image or Dockerfile when registering", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await expect(api.registerSnapshot({ name: "base" })).rejects.toThrow(
+      "An image or Dockerfile is required.",
+    );
+    await expect(
+      api.registerSnapshot({ name: "base", image: "ubuntu", dockerfile: "FROM scratch" }),
+    ).rejects.toThrow("Provide either an image or a Dockerfile, not both.");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("rejects empty and reserved snapshot names before calling the server", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await expect(api.createSnapshot("sb-1", "   ")).rejects.toThrow("Snapshot name is required.");
+    await expect(api.createSnapshot("sb-1", "aerolvm-snapshot/base")).rejects.toThrow("reserved");
+    await expect(
+      api.registerSnapshot({ name: "aerolvm-snapshot/x", image: "ubuntu" }),
+    ).rejects.toThrow("reserved");
+    await expect(api.getSnapshot("")).rejects.toThrow("Snapshot name is required.");
+    await expect(api.deleteSnapshot("aerolvm-snapshot/x")).rejects.toThrow("reserved");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("deletes a snapshot by its trimmed name", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.deleteSnapshot("  golden  ");
+    expect(calls[0]).toEqual({ method: "deleteSnapshot", args: ["golden"] });
+  });
+});
+
+describe("LewdevApi account limits", () => {
+  test("maps the caller's team and expiry", async () => {
+    const { sdk, calls } = fakeSdk({
+      whoami: {
+        principal: { kind: "token", id: "tok_test" },
+        role: "runner",
+        team: "acme",
+        expiresAt: "2026-12-01T00:00:00Z",
+      },
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.whoami()).toEqual({
+      role: "runner",
+      team: "acme",
+      expiresAt: "2026-12-01T00:00:00Z",
+    });
+    expect(calls[0]).toEqual({ method: "whoami", args: [] });
+  });
+
+  test("maps a team quota's limits and usage", async () => {
+    const { sdk, calls } = fakeSdk({
+      getTeamQuota: (team) => ({
+        team,
+        maxSandboxes: 10,
+        maxCPU: 8,
+        maxMemoryMB: 16384,
+        generation: 3,
+        createdAt,
+        updatedAt: createdAt,
+        usage: { sandboxes: 3, cpu: 3, memoryMB: 3072 },
+      }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.getTeamQuota("acme")).toEqual({
+      team: "acme",
+      maxSandboxes: 10,
+      maxCPU: 8,
+      maxMemoryMB: 16384,
+      usage: { sandboxes: 3, cpu: 3, memoryMB: 3072 },
+    });
+    expect(calls[0]).toEqual({ method: "getTeamQuota", args: ["acme"] });
   });
 });

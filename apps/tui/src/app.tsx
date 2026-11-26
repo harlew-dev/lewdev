@@ -1,4 +1,6 @@
 import {
+  type AccountInfo,
+  backgroundUpdateCheck,
   buildSshArgv,
   type CreateSandboxInput,
   deletePrivateKey,
@@ -9,23 +11,31 @@ import {
   getConfigPath,
   getKeyPath,
   getKnownHostsPath,
+  isStandaloneBuild,
   knownHostsEntry,
   LewdevApi,
   type LewdevConfig,
   loadConfig,
   normalizeApiUrl,
   privateKeyExists,
+  type RegisterSnapshotInput,
   type SandboxDetails,
   type SandboxInfo,
   saveConfig,
   savePrivateKey,
+  type SnapshotInfo,
   SSH_PORT,
   sshHostFromApiUrl,
+  summarizeUsage,
+  type TeamQuotaInfo,
+  type UpdateNotice,
+  type UsageSummary,
 } from "@lewdev/core";
 import type { KeyEvent } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
 import { useKeyboard, usePaste, useRenderer } from "@opentui/react";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -35,21 +45,34 @@ import {
   type ActionHint,
   type ActionId,
   buildConnectActions,
+  buildCreateSnapshotActions,
   buildDeleteActions,
+  buildForgetHostActions,
   buildNewSandboxActions,
+  buildNewSnapshotActions,
   buildOpenPortActions,
   buildPortsPageActions,
   buildSandboxListActions,
   buildSandboxPageActions,
   buildSandboxPageGroups,
-  buildForgetHostActions,
+  buildSnapshotDeleteActions,
+  buildSnapshotListActions,
+  buildSnapshotPageActions,
   buildSshDetailsActions,
   findActionForKey,
   nextActionId,
   type PageAction,
 } from "./actions";
 import { readClipboard, writeClipboard } from "./clipboard";
-import { BusyLine, Header, KeyHints, ToastLine, type ToastMessage } from "./components";
+import {
+  BusyLine,
+  Header,
+  HomeTabs,
+  KeyHints,
+  ToastLine,
+  type ToastMessage,
+  UsageBar,
+} from "./components";
 import { safeHost, sandboxLabel } from "./format";
 import {
   backFromTerminal,
@@ -62,35 +85,58 @@ import {
   pushSandboxScoped as pushScopedPage,
   ROOT_PAGE,
   type SandboxPageTarget,
+  SNAPSHOTS_PAGE,
 } from "./navigation";
 import { type ConnectField, type ConnectFormState, ConnectScreen } from "./screens/connect";
 import {
+  buildSnapshotMenuOptions,
   CREATE_DEFAULT,
   type CreateFocus,
   type CreateFormValues,
   createSizeInput,
-  IMAGE_OPTIONS,
+  type DockerfileMode,
+  IMAGE_MENU_OPTIONS,
   imageOptionIndex,
+  menuOptionAt,
   moveSize,
   nextCreateFocus,
+  nextMenuIndex,
   resolveDockerfilePath,
   selectImageOption,
+  selectSnapshotOption,
+  snapshotOptionIndex,
+  toggleDockerfileMode,
 } from "./create-form";
 import { CreateScreen } from "./screens/create";
+import { CreateSnapshotScreen, type CreateSnapshotFocus } from "./screens/create-snapshot";
 import { DeleteSandboxScreen } from "./screens/delete-sandbox";
+import { DeleteSnapshotScreen } from "./screens/delete-snapshot";
 import { DetailsScreen } from "./screens/details";
 import { ForgetHostScreen } from "./screens/forget-host";
 import { ListScreen } from "./screens/list";
+import { NewSnapshotScreen } from "./screens/new-snapshot";
 import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
 import { PORT_VISIBILITY_OPTIONS } from "./port-options";
 import { PortsScreen } from "./screens/ports";
+import { SnapshotDetailsScreen } from "./screens/snapshot-details";
+import { SnapshotsScreen } from "./screens/snapshots";
 import { SshDetailsScreen } from "./screens/ssh-details";
 import {
   type SshExitResult,
   type SshSessionHandle,
   SshTerminalScreen,
 } from "./screens/ssh-terminal";
+import {
+  createValuesFromSnapshot,
+  NEW_SNAPSHOT_DEFAULT,
+  type NewSnapshotFocus,
+  type NewSnapshotFormValues,
+  newSnapshotSizeInput,
+  nextNewSnapshotFocus,
+  toggleSnapshotSource,
+} from "./snapshot-form";
 import { colors } from "./theme";
+import { VERSION } from "./version";
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
@@ -98,6 +144,11 @@ const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "subm
 const PORT_FIELDS: [PortFormValues["field"], ...PortFormValues["field"][]] = [
   "port",
   "visibility",
+  "submit",
+];
+const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = [
+  "name",
+  "allow-pause",
   "submit",
 ];
 
@@ -142,15 +193,33 @@ function targetForSandbox(sandbox: SandboxInfo): SandboxPageTarget {
   return { id: sandbox.id, label: sandboxLabel(sandbox) };
 }
 
-async function readDockerfileContents(values: CreateFormValues): Promise<string> {
-  if (values.dockerfileContents.trim().length > 0) {
+async function readDockerfileContents(values: {
+  dockerfileMode: DockerfileMode;
+  dockerfileContents: string;
+  dockerfilePath: string;
+}): Promise<string> {
+  if (values.dockerfileMode === "paste") {
+    if (!values.dockerfileContents.trim()) {
+      throw new Error("Paste or type a Dockerfile.");
+    }
     return values.dockerfileContents;
   }
+
   const path = values.dockerfilePath.trim();
   if (!path) {
     throw new Error("Dockerfile path is required.");
   }
-  const resolved = resolveDockerfilePath(path);
+  const initial = resolveDockerfilePath(path);
+  let resolved = initial;
+  try {
+    const info = await stat(initial);
+    if (info.isDirectory()) {
+      resolved = join(initial, "Dockerfile");
+    }
+  } catch (error) {
+    throw new Error(`Could not read ${initial}: ${describeError(error)}`);
+  }
+
   let contents: string;
   try {
     contents = await readFile(resolved, "utf8");
@@ -174,6 +243,9 @@ export function App() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
+  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [teamQuota, setTeamQuota] = useState<TeamQuotaInfo | null>(null);
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
 
   const [connectForm, setConnectForm] = useState<ConnectFormState>({ url: "", token: "" });
   const [connectField, setConnectField] = useState<ConnectField>("url");
@@ -187,11 +259,34 @@ export function App() {
   const hasSandboxes = useRef(false);
   const clipboardBusy = useRef(false);
 
+  const [snapshots, setSnapshots] = useState<SnapshotInfo[]>([]);
+  const [snapshotSelected, setSnapshotSelected] = useState(0);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [snapshotsError, setSnapshotsError] = useState<string | null>(null);
+  const hasSnapshots = useRef(false);
+  const [snapshotsLoaded, setSnapshotsLoaded] = useState(false);
+
+  const [snapshotDetails, setSnapshotDetails] = useState<SnapshotInfo | null>(null);
+  const [snapshotDetailsLoading, setSnapshotDetailsLoading] = useState(false);
+  const [snapshotDetailsError, setSnapshotDetailsError] = useState<string | null>(null);
+
+  const [createSnapshotName, setCreateSnapshotName] = useState("");
+  const [createSnapshotAllowPause, setCreateSnapshotAllowPause] = useState(true);
+  const [createSnapshotFocus, setCreateSnapshotFocus] = useState<CreateSnapshotFocus>("name");
+  const [createSnapshotError, setCreateSnapshotError] = useState<string | null>(null);
+
+  const [newSnapshotValues, setNewSnapshotValues] =
+    useState<NewSnapshotFormValues>(NEW_SNAPSHOT_DEFAULT);
+  const [newSnapshotFocus, setNewSnapshotFocus] = useState<NewSnapshotFocus>("name");
+  const [newSnapshotError, setNewSnapshotError] = useState<string | null>(null);
+
   const [createValues, setCreateValues] = useState<CreateFormValues>(CREATE_DEFAULT);
   const [createFocus, setCreateFocus] = useState<CreateFocus>("image");
   const [createError, setCreateError] = useState<string | null>(null);
   const [imageMenuOpen, setImageMenuOpen] = useState(false);
   const [imageMenuIndex, setImageMenuIndex] = useState(0);
+  const [snapshotMenuOpen, setSnapshotMenuOpen] = useState(false);
+  const [snapshotMenuIndex, setSnapshotMenuIndex] = useState(0);
 
   const [details, setDetails] = useState<SandboxDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -219,10 +314,53 @@ export function App() {
     page.kind === "open-port";
   const pageDetails = details && details.id === sandboxId ? details : null;
   const selectedSandbox = sandboxes[selected];
+  const selectedSnapshot = snapshots[snapshotSelected];
+  const snapshotPageName = page.kind === "snapshot" ? page.name : null;
+  const snapshotMenuOptions = useMemo(
+    () => buildSnapshotMenuOptions(snapshots, snapshotsLoaded),
+    [snapshots, snapshotsLoaded],
+  );
+  const previousSnapshotMenuOptions = useRef(snapshotMenuOptions);
+
+  // Snapshots can finish loading while the Snapshot menu is open; keep the
+  // cursor on the same option instead of the same row index.
+  useEffect(() => {
+    const previous = previousSnapshotMenuOptions.current;
+    previousSnapshotMenuOptions.current = snapshotMenuOptions;
+    if (previous === snapshotMenuOptions) {
+      return;
+    }
+    setSnapshotMenuIndex((index) => {
+      const option = menuOptionAt(previous, index);
+      const moved = option
+        ? snapshotMenuOptions.findIndex((candidate) => candidate.id === option.id)
+        : -1;
+      return moved >= 0 ? moved : Math.min(index, Math.max(0, snapshotMenuOptions.length - 1));
+    });
+  }, [snapshotMenuOptions]);
 
   const showToast = useCallback((kind: ToastMessage["kind"], message: string) => {
     setToast({ kind, message });
   }, []);
+
+  useEffect(() => {
+    if (!isStandaloneBuild()) {
+      return;
+    }
+    let cancelled = false;
+    void backgroundUpdateCheck(VERSION)
+      .then((notice) => {
+        if (cancelled || !notice) {
+          return;
+        }
+        setUpdateNotice(notice);
+        showToast("info", `lewdev ${notice.latestVersion} is available. Run \`lewdev update\`.`);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [showToast]);
 
   const refreshList = useCallback(
     async (showLoading = false): Promise<SandboxInfo[]> => {
@@ -268,6 +406,51 @@ export function App() {
     [api],
   );
 
+  const refreshSnapshots = useCallback(
+    async (showLoading = false): Promise<SnapshotInfo[]> => {
+      if (!api) {
+        return [];
+      }
+      if (showLoading) {
+        setSnapshotsLoading(true);
+      }
+      try {
+        const items = await api.listSnapshots();
+        setSnapshots(items);
+        setSnapshotsLoaded(true);
+        setSnapshotsError(null);
+        return items;
+      } catch (error) {
+        setSnapshotsError(describeError(error));
+        return [];
+      } finally {
+        if (showLoading) {
+          setSnapshotsLoading(false);
+        }
+      }
+    },
+    [api],
+  );
+
+  const loadSnapshotDetails = useCallback(
+    async (name: string): Promise<void> => {
+      if (!api) {
+        return;
+      }
+      setSnapshotDetailsLoading(true);
+      try {
+        const next = await api.getSnapshot(name);
+        setSnapshotDetails(next);
+        setSnapshotDetailsError(null);
+      } catch (error) {
+        setSnapshotDetailsError(describeError(error));
+      } finally {
+        setSnapshotDetailsLoading(false);
+      }
+    },
+    [api],
+  );
+
   const quit = useCallback(() => {
     sshSession.current?.kill();
     sshSession.current = null;
@@ -289,6 +472,17 @@ export function App() {
   useEffect(() => {
     hasSandboxes.current = sandboxes.length > 0;
   }, [sandboxes.length]);
+
+  useEffect(() => {
+    hasSnapshots.current = snapshots.length > 0;
+  }, [snapshots.length]);
+
+  useEffect(() => {
+    if (!api) {
+      return;
+    }
+    void refreshSnapshots(false);
+  }, [api, refreshSnapshots]);
 
   useEffect(() => {
     let cancelled = false;
@@ -325,6 +519,33 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!api) {
+      setAccount(null);
+      setTeamQuota(null);
+      return;
+    }
+    let cancelled = false;
+    setAccount(null);
+    setTeamQuota(null);
+    void api
+      .whoami()
+      .then((info) => {
+        if (!cancelled) {
+          setAccount(info);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAccount(null);
+          setTeamQuota(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
+
+  useEffect(() => {
     if (!api || page.kind !== "sandboxes") {
       return;
     }
@@ -338,8 +559,86 @@ export function App() {
   }, [api, page.kind, refreshList]);
 
   useEffect(() => {
+    if (!api || page.kind !== "snapshots") {
+      return;
+    }
+    void refreshSnapshots(!hasSnapshots.current);
+    const timer = setInterval(() => {
+      void refreshSnapshots(false);
+    }, 3000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [api, page.kind, refreshSnapshots]);
+
+  useEffect(() => {
+    if (!api || page.kind !== "new-sandbox") {
+      return;
+    }
+    void refreshSnapshots(false);
+  }, [api, page.kind, refreshSnapshots]);
+
+  useEffect(() => {
     setSelected((previous) => (sandboxes.length === 0 ? 0 : Math.min(previous, sandboxes.length)));
   }, [sandboxes.length]);
+
+  useEffect(() => {
+    setSnapshotSelected((previous) =>
+      snapshots.length === 0 ? 0 : Math.min(previous, snapshots.length),
+    );
+  }, [snapshots.length]);
+
+  useEffect(() => {
+    if (snapshotPageName === null) {
+      return;
+    }
+    setSnapshotDetailsLoading(true);
+    void loadSnapshotDetails(snapshotPageName);
+  }, [snapshotPageName, loadSnapshotDetails]);
+
+  const team = account?.team && account.team !== "*" ? account.team : null;
+
+  useEffect(() => {
+    if (!team) {
+      setTeamQuota(null);
+      return;
+    }
+    if (!api || (page.kind !== "sandboxes" && page.kind !== "snapshots")) {
+      return;
+    }
+    let cancelled = false;
+    const load = async (): Promise<void> => {
+      try {
+        const quota = await api.getTeamQuota(team);
+        if (!cancelled) {
+          setTeamQuota(quota);
+        }
+      } catch {
+        if (!cancelled) {
+          setTeamQuota(null);
+        }
+      }
+    };
+    void load();
+    const timer = setInterval(() => {
+      void load();
+    }, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [api, team, page.kind]);
+
+  const usage = useMemo<UsageSummary>(
+    () =>
+      summarizeUsage({
+        sandboxes,
+        snapshotCount: snapshotsLoaded ? snapshots.length : null,
+        team: account?.team,
+        quota: teamQuota,
+      }),
+    [sandboxes, snapshots.length, snapshotsLoaded, account, teamQuota],
+  );
 
   useEffect(() => {
     if (!usesDetails || !sandboxId) {
@@ -488,8 +787,18 @@ export function App() {
     switch (page.kind) {
       case "sandboxes":
         return buildSandboxListActions();
+      case "snapshots":
+        return buildSnapshotListActions();
       case "sandbox":
         return buildSandboxPageActions(ctx);
+      case "snapshot":
+        return buildSnapshotPageActions();
+      case "delete-snapshot":
+        return buildSnapshotDeleteActions();
+      case "new-snapshot":
+        return buildNewSnapshotActions();
+      case "create-snapshot":
+        return buildCreateSnapshotActions();
       case "ssh-details":
         return buildSshDetailsActions({ canForgetHost: gatewayHost !== null });
       case "forget-host":
@@ -540,6 +849,16 @@ export function App() {
   function runAction(id: ActionId): void {
     switch (id) {
       case "open": {
+        if (page.kind === "snapshots") {
+          if (selectedSnapshot) {
+            setSnapshotDetails(selectedSnapshot);
+            setSnapshotDetailsError(null);
+            push({ kind: "snapshot", name: selectedSnapshot.name });
+          } else {
+            openNewSnapshot();
+          }
+          return;
+        }
         if (selected >= sandboxes.length) {
           openCreate();
           return;
@@ -598,6 +917,36 @@ export function App() {
         return;
       case "new":
         openCreate();
+        return;
+      case "new-snapshot":
+        openNewSnapshot();
+        return;
+      case "create-snapshot": {
+        const target = actionTarget();
+        if (target) {
+          setCreateSnapshotName("");
+          setCreateSnapshotAllowPause(true);
+          setCreateSnapshotFocus("name");
+          setCreateSnapshotError(null);
+          pushSandboxScoped({ kind: "create-snapshot", ...target });
+        }
+        return;
+      }
+      case "new-sandbox-from-snapshot": {
+        if (snapshotDetails) {
+          openCreateFromSnapshot(snapshotDetails);
+        }
+        return;
+      }
+      case "delete-snapshot": {
+        if (page.kind === "snapshot") {
+          push({ kind: "delete-snapshot", name: page.name });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-delete-snapshot":
+        void performDeleteSnapshot();
         return;
       case "connect":
         openConnect();
@@ -784,21 +1133,60 @@ export function App() {
     setCreateError(null);
     setImageMenuOpen(false);
     setImageMenuIndex(0);
+    setSnapshotMenuOpen(false);
+    setSnapshotMenuIndex(0);
     push({ kind: "new-sandbox" });
+  }
+
+  function openCreateFromSnapshot(snapshot: SnapshotInfo): void {
+    setCreateValues(createValuesFromSnapshot(snapshot));
+    setCreateFocus("image-snapshot");
+    setCreateError(null);
+    setImageMenuOpen(false);
+    setImageMenuIndex(0);
+    setSnapshotMenuOpen(false);
+    setSnapshotMenuIndex(0);
+    push({ kind: "new-sandbox" });
+  }
+
+  function openNewSnapshot(): void {
+    setNewSnapshotValues(NEW_SNAPSHOT_DEFAULT);
+    setNewSnapshotFocus("name");
+    setNewSnapshotError(null);
+    push({ kind: "new-snapshot" });
   }
 
   function openImageMenu(): void {
     setImageMenuIndex(imageOptionIndex(createValues));
+    setSnapshotMenuOpen(false);
     setImageMenuOpen(true);
   }
 
   function chooseImageOption(index: number): void {
-    const option = IMAGE_OPTIONS[index];
-    if (!option) {
+    const option = menuOptionAt(IMAGE_MENU_OPTIONS, index);
+    if (!option || option.disabled) {
       return;
     }
     setCreateValues((previous) => selectImageOption(previous, option));
     setImageMenuOpen(false);
+    if (option.kind === "snapshot") {
+      setCreateFocus("image-snapshot");
+    }
+  }
+
+  function openSnapshotMenu(): void {
+    setSnapshotMenuIndex(snapshotOptionIndex(createValues.snapshotName, snapshotMenuOptions));
+    setImageMenuOpen(false);
+    setSnapshotMenuOpen(true);
+  }
+
+  function chooseSnapshotOption(index: number): void {
+    const option = menuOptionAt(snapshotMenuOptions, index);
+    if (!option || option.disabled) {
+      return;
+    }
+    setCreateValues((previous) => selectSnapshotOption(previous, option));
+    setSnapshotMenuOpen(false);
   }
 
   function openVisibilityMenu(): void {
@@ -825,6 +1213,12 @@ export function App() {
         return;
       case "new-sandbox":
         void submitCreate();
+        return;
+      case "new-snapshot":
+        void submitNewSnapshot();
+        return;
+      case "create-snapshot":
+        void submitCreateSnapshot();
         return;
       case "open-port":
         void submitPort();
@@ -935,6 +1329,14 @@ export function App() {
           input.image = image;
           break;
         }
+        case "snapshot": {
+          const snapshotName = createValues.snapshotName.trim();
+          if (!snapshotName) {
+            throw new Error("Choose a snapshot.");
+          }
+          input.image = snapshotName;
+          break;
+        }
         case "preset":
           input.image = createValues.image;
           break;
@@ -969,6 +1371,8 @@ export function App() {
       setCreateFocus("image");
       setImageMenuOpen(false);
       setImageMenuIndex(0);
+      setSnapshotMenuOpen(false);
+      setSnapshotMenuIndex(0);
       setSelectedActionId(null);
       setStack([ROOT_PAGE]);
       showToast(
@@ -979,6 +1383,116 @@ export function App() {
       );
     } catch (error) {
       setCreateError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitCreateSnapshot(): Promise<void> {
+    if (!api || page.kind !== "create-snapshot" || busyMessage) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target) {
+      return;
+    }
+    setCreateSnapshotError(null);
+    setBusyMessage("Creating snapshot…");
+    try {
+      const created = await api.createSnapshot(target.id, createSnapshotName, {
+        allowPause: createSnapshotAllowPause,
+      });
+      setCreateSnapshotName("");
+      setCreateSnapshotAllowPause(true);
+      setCreateSnapshotFocus("name");
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Snapshot ${created.name} created`);
+      void refreshSnapshots(false);
+    } catch (error) {
+      setCreateSnapshotError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitNewSnapshot(): Promise<void> {
+    if (!api || page.kind !== "new-snapshot" || busyMessage) {
+      return;
+    }
+    setNewSnapshotError(null);
+
+    const input: RegisterSnapshotInput = { name: newSnapshotValues.name };
+    try {
+      input.name = newSnapshotValues.name.trim();
+      if (!input.name) {
+        throw new Error("Snapshot name is required.");
+      }
+      if (newSnapshotValues.source === "dockerfile") {
+        input.dockerfile = await readDockerfileContents(newSnapshotValues);
+      } else {
+        const image = newSnapshotValues.image.trim();
+        if (!image) {
+          throw new Error("Image reference is required.");
+        }
+        input.image = image;
+      }
+
+      const size = newSnapshotSizeInput(newSnapshotValues);
+      if (size.cpu !== undefined) {
+        input.cpu = size.cpu;
+      }
+      if (size.memoryMB !== undefined) {
+        input.memoryMB = size.memoryMB;
+      }
+      if (size.diskGB !== undefined) {
+        input.diskGB = size.diskGB;
+      }
+    } catch (error) {
+      setNewSnapshotError(describeError(error));
+      return;
+    }
+
+    setBusyMessage(
+      input.dockerfile === undefined
+        ? "Registering snapshot…"
+        : "Building image and registering snapshot…",
+    );
+    try {
+      const created = await api.registerSnapshot(input);
+      const items = await refreshSnapshots(false);
+      const index = items.findIndex((snapshot) => snapshot.name === created.name);
+      if (index >= 0) {
+        setSnapshotSelected(index);
+      }
+      setNewSnapshotValues(NEW_SNAPSHOT_DEFAULT);
+      setNewSnapshotFocus("name");
+      setSelectedActionId(null);
+      setStack([SNAPSHOTS_PAGE]);
+      showToast("success", `Snapshot ${created.name} created`);
+    } catch (error) {
+      setNewSnapshotError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performDeleteSnapshot(): Promise<void> {
+    if (page.kind !== "delete-snapshot" || !api) {
+      return;
+    }
+    const name = page.name;
+
+    setBusyMessage(`Deleting snapshot ${name}…`);
+    try {
+      await api.deleteSnapshot(name);
+      setSnapshotDetails(null);
+      setSelectedActionId(null);
+      setStack([SNAPSHOTS_PAGE]);
+      await refreshSnapshots(false);
+      showToast("success", `Deleted snapshot ${name}.`);
+    } catch (error) {
+      showToast("error", describeError(error));
     } finally {
       setBusyMessage(null);
     }
@@ -1109,11 +1623,35 @@ export function App() {
   }
 
   function insertPastedText(raw: string): void {
-    if (page.kind === "new-sandbox" && createFocus === "image-dockerfile" && /[\r\n]/.test(raw)) {
+    if (
+      page.kind === "new-sandbox" &&
+      createFocus === "image-dockerfile" &&
+      (createValues.dockerfileMode === "paste" || /[\r\n]/.test(raw))
+    ) {
+      const pasted = raw.replace(/\r\n/g, "\n");
       setCreateValues((previous) => ({
         ...previous,
-        dockerfilePath: "",
-        dockerfileContents: raw.replace(/\r\n/g, "\n"),
+        dockerfileMode: "paste",
+        dockerfileContents:
+          previous.dockerfileMode === "paste"
+            ? appendText(previous.dockerfileContents, pasted)
+            : pasted,
+      }));
+      return;
+    }
+    if (
+      page.kind === "new-snapshot" &&
+      newSnapshotFocus === "dockerfile" &&
+      (newSnapshotValues.dockerfileMode === "paste" || /[\r\n]/.test(raw))
+    ) {
+      const pasted = raw.replace(/\r\n/g, "\n");
+      setNewSnapshotValues((previous) => ({
+        ...previous,
+        dockerfileMode: "paste",
+        dockerfileContents:
+          previous.dockerfileMode === "paste"
+            ? appendText(previous.dockerfileContents, pasted)
+            : pasted,
       }));
       return;
     }
@@ -1143,10 +1681,9 @@ export function App() {
             customImage: appendText(previous.customImage, text),
           }));
           return;
+        case "image-dockerfile-mode":
+          return;
         case "image-dockerfile":
-          if (createValues.dockerfileContents) {
-            return;
-          }
           setCreateValues((previous) => ({
             ...previous,
             dockerfilePath: appendText(previous.dockerfilePath, text),
@@ -1185,6 +1722,59 @@ export function App() {
           return;
       }
     }
+    if (page.kind === "create-snapshot") {
+      if (createSnapshotFocus === "name") {
+        setCreateSnapshotName((previous) => appendText(previous, text));
+      }
+      return;
+    }
+    if (page.kind === "new-snapshot") {
+      switch (newSnapshotFocus) {
+        case "name":
+          setNewSnapshotValues((previous) => ({
+            ...previous,
+            name: appendText(previous.name, text),
+          }));
+          return;
+        case "source":
+        case "dockerfile-mode":
+        case "submit":
+          return;
+        case "image-ref":
+          setNewSnapshotValues((previous) => ({
+            ...previous,
+            image: appendText(previous.image, text),
+          }));
+          return;
+        case "dockerfile":
+          setNewSnapshotValues((previous) => ({
+            ...previous,
+            dockerfilePath: appendText(previous.dockerfilePath, text),
+          }));
+          return;
+        case "cpu":
+        case "memory": {
+          const key = newSnapshotFocus === "cpu" ? "cpu" : "memoryGB";
+          const merged = `${newSnapshotValues[key]}${text}`.replace(/[^\d.]/g, "");
+          const [whole = "", ...rest] = merged.split(".");
+          setNewSnapshotValues((previous) => ({
+            ...previous,
+            [key]: rest.length > 0 ? `${whole}.${rest.join("")}` : whole,
+          }));
+          return;
+        }
+        case "disk": {
+          const digits = text.replace(/\D/g, "");
+          if (digits) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              diskGB: appendText(previous.diskGB, digits),
+            }));
+          }
+          return;
+        }
+      }
+    }
     if (page.kind === "open-port" && portForm?.field === "port") {
       const digits = text.replace(/\D/g, "");
       if (digits) {
@@ -1220,13 +1810,35 @@ export function App() {
       return;
     }
 
-    if (page.kind === "sandboxes") {
-      if (key.name === "down" || actionKey(key) === "j") {
-        setSelected((previous) => Math.min(previous + 1, sandboxes.length));
+    if (page.kind === "sandboxes" || page.kind === "snapshots") {
+      const pressed = actionKey(key);
+      if (key.name === "tab" || key.name === "backtab") {
+        setSelectedActionId(null);
+        setStack([page.kind === "sandboxes" ? SNAPSHOTS_PAGE : ROOT_PAGE]);
         return;
       }
-      if (key.name === "up" || actionKey(key) === "k") {
-        setSelected((previous) => Math.max(0, previous - 1));
+      if (pressed === "1") {
+        setStack([ROOT_PAGE]);
+        return;
+      }
+      if (pressed === "2") {
+        setStack([SNAPSHOTS_PAGE]);
+        return;
+      }
+      if (key.name === "down" || pressed === "j") {
+        if (page.kind === "sandboxes") {
+          setSelected((previous) => Math.min(previous + 1, sandboxes.length));
+        } else {
+          setSnapshotSelected((previous) => Math.min(previous + 1, snapshots.length));
+        }
+        return;
+      }
+      if (key.name === "up" || pressed === "k") {
+        if (page.kind === "sandboxes") {
+          setSelected((previous) => Math.max(0, previous - 1));
+        } else {
+          setSnapshotSelected((previous) => Math.max(0, previous - 1));
+        }
         return;
       }
     }
@@ -1249,8 +1861,10 @@ export function App() {
 
     if (
       page.kind === "sandbox" ||
+      page.kind === "snapshot" ||
       page.kind === "ssh-details" ||
       page.kind === "delete-sandbox" ||
+      page.kind === "delete-snapshot" ||
       page.kind === "forget-host"
     ) {
       if (key.name === "down" || actionKey(key) === "j") {
@@ -1278,11 +1892,11 @@ export function App() {
     if (page.kind === "new-sandbox") {
       if (imageMenuOpen) {
         if (key.name === "down" || actionKey(key) === "j") {
-          setImageMenuIndex((index) => Math.min(index + 1, IMAGE_OPTIONS.length - 1));
+          setImageMenuIndex((index) => nextMenuIndex(IMAGE_MENU_OPTIONS, index, 1));
           return;
         }
         if (key.name === "up" || actionKey(key) === "k") {
-          setImageMenuIndex((index) => Math.max(0, index - 1));
+          setImageMenuIndex((index) => nextMenuIndex(IMAGE_MENU_OPTIONS, index, -1));
           return;
         }
         if (key.name === "return" || key.name === "space") {
@@ -1295,8 +1909,57 @@ export function App() {
         }
         return;
       }
+      if (snapshotMenuOpen) {
+        if (key.name === "down" || actionKey(key) === "j") {
+          setSnapshotMenuIndex((index) => nextMenuIndex(snapshotMenuOptions, index, 1));
+          return;
+        }
+        if (key.name === "up" || actionKey(key) === "k") {
+          setSnapshotMenuIndex((index) => nextMenuIndex(snapshotMenuOptions, index, -1));
+          return;
+        }
+        if (key.name === "return" || key.name === "space") {
+          chooseSnapshotOption(snapshotMenuIndex);
+          return;
+        }
+        if (key.name === "escape") {
+          setSnapshotMenuOpen(false);
+          return;
+        }
+        return;
+      }
+      if (
+        createFocus === "image-dockerfile-mode" &&
+        (key.name === "left" || key.name === "right")
+      ) {
+        setCreateValues((previous) => ({
+          ...previous,
+          dockerfileMode: toggleDockerfileMode(previous.dockerfileMode),
+        }));
+        return;
+      }
+      if (
+        key.name === "return" &&
+        createFocus === "image-dockerfile" &&
+        createValues.dockerfileMode === "paste"
+      ) {
+        setCreateValues((previous) => ({
+          ...previous,
+          dockerfileContents: appendText(previous.dockerfileContents, "\n"),
+        }));
+        return;
+      }
+      if (key.name === "down" || key.name === "up") {
+        const delta = key.name === "down" ? 1 : -1;
+        setCreateFocus((current) => nextCreateFocus(createValues, current, delta));
+        return;
+      }
       if (createFocus === "image" && (key.name === "return" || key.name === "space")) {
         openImageMenu();
+        return;
+      }
+      if (createFocus === "image-snapshot" && (key.name === "return" || key.name === "space")) {
+        openSnapshotMenu();
         return;
       }
     }
@@ -1325,6 +1988,78 @@ export function App() {
       }
       if (portForm?.field === "visibility" && (key.name === "return" || key.name === "space")) {
         openVisibilityMenu();
+        return;
+      }
+    }
+
+    if (page.kind === "create-snapshot") {
+      if (
+        key.name === "tab" ||
+        key.name === "backtab" ||
+        key.name === "down" ||
+        key.name === "up"
+      ) {
+        const backward =
+          key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift);
+        setCreateSnapshotFocus((current) =>
+          nextField(CREATE_SNAPSHOT_FIELDS, current, backward ? -1 : 1),
+        );
+        return;
+      }
+      if (
+        createSnapshotFocus === "allow-pause" &&
+        (key.name === "space" || key.name === "left" || key.name === "right")
+      ) {
+        setCreateSnapshotAllowPause((value) => !value);
+        return;
+      }
+      if (key.name === "return" && createSnapshotFocus !== "submit") {
+        setCreateSnapshotFocus((current) => nextField(CREATE_SNAPSHOT_FIELDS, current, 1));
+        return;
+      }
+    }
+
+    if (page.kind === "new-snapshot") {
+      if (
+        key.name === "tab" ||
+        key.name === "backtab" ||
+        key.name === "down" ||
+        key.name === "up"
+      ) {
+        const backward =
+          key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift);
+        setNewSnapshotFocus((current) =>
+          nextNewSnapshotFocus(newSnapshotValues, current, backward ? -1 : 1),
+        );
+        return;
+      }
+      if (newSnapshotFocus === "source" && (key.name === "left" || key.name === "right")) {
+        setNewSnapshotValues((previous) => ({
+          ...previous,
+          source: toggleSnapshotSource(previous.source),
+        }));
+        return;
+      }
+      if (newSnapshotFocus === "dockerfile-mode" && (key.name === "left" || key.name === "right")) {
+        setNewSnapshotValues((previous) => ({
+          ...previous,
+          dockerfileMode: toggleDockerfileMode(previous.dockerfileMode),
+        }));
+        return;
+      }
+      if (
+        key.name === "return" &&
+        newSnapshotFocus === "dockerfile" &&
+        newSnapshotValues.dockerfileMode === "paste"
+      ) {
+        setNewSnapshotValues((previous) => ({
+          ...previous,
+          dockerfileContents: appendText(previous.dockerfileContents, "\n"),
+        }));
+        return;
+      }
+      if (key.name === "return" && newSnapshotFocus !== "submit") {
+        setNewSnapshotFocus((current) => nextNewSnapshotFocus(newSnapshotValues, current, 1));
         return;
       }
     }
@@ -1426,10 +2161,25 @@ export function App() {
         return;
       }
 
+      if (createFocus === "image-dockerfile-mode") {
+        return;
+      }
+
       if (createFocus === "image-dockerfile") {
-        if (createValues.dockerfileContents) {
+        if (createValues.dockerfileMode === "paste") {
           if (key.name === "backspace" || key.name === "delete") {
-            setCreateValues((previous) => ({ ...previous, dockerfileContents: "" }));
+            setCreateValues((previous) => ({
+              ...previous,
+              dockerfileContents: removeLastChar(previous.dockerfileContents),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (char) {
+            setCreateValues((previous) => ({
+              ...previous,
+              dockerfileContents: appendText(previous.dockerfileContents, char),
+            }));
           }
           return;
         }
@@ -1532,6 +2282,139 @@ export function App() {
         );
       }
     }
+
+    if (page.kind === "create-snapshot") {
+      if (createSnapshotFocus !== "name") {
+        return;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        setCreateSnapshotName((previous) => removeLastChar(previous));
+        return;
+      }
+      const char = printableChar(key);
+      if (char) {
+        setCreateSnapshotName((previous) => appendText(previous, char));
+      }
+      return;
+    }
+
+    if (page.kind === "new-snapshot") {
+      switch (newSnapshotFocus) {
+        case "source":
+        case "submit":
+          return;
+        case "image-ref": {
+          if (key.name === "backspace" || key.name === "delete") {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              image: removeLastChar(previous.image),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (char) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              image: appendText(previous.image, char),
+            }));
+          }
+          return;
+        }
+        case "dockerfile-mode":
+          return;
+        case "dockerfile": {
+          if (newSnapshotValues.dockerfileMode === "paste") {
+            if (key.name === "backspace" || key.name === "delete") {
+              setNewSnapshotValues((previous) => ({
+                ...previous,
+                dockerfileContents: removeLastChar(previous.dockerfileContents),
+              }));
+              return;
+            }
+            const char = printableChar(key);
+            if (char) {
+              setNewSnapshotValues((previous) => ({
+                ...previous,
+                dockerfileContents: appendText(previous.dockerfileContents, char),
+              }));
+            }
+            return;
+          }
+          if (key.name === "backspace" || key.name === "delete") {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              dockerfilePath: removeLastChar(previous.dockerfilePath),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (char) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              dockerfilePath: appendText(previous.dockerfilePath, char),
+            }));
+          }
+          return;
+        }
+        case "cpu":
+        case "memory": {
+          const field = newSnapshotFocus === "cpu" ? "cpu" : "memoryGB";
+          if (key.name === "backspace" || key.name === "delete") {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              [field]: removeLastChar(previous[field]),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (!char) {
+            return;
+          }
+          const value = newSnapshotValues[field];
+          if (/^\d$/.test(char) || (char === "." && !value.includes("."))) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              [field]: appendText(value, char),
+            }));
+          }
+          return;
+        }
+        case "disk": {
+          if (key.name === "backspace" || key.name === "delete") {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              diskGB: removeLastChar(previous.diskGB),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (char && /^\d$/.test(char)) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              diskGB: appendText(previous.diskGB, char),
+            }));
+          }
+          return;
+        }
+        case "name": {
+          if (key.name === "backspace" || key.name === "delete") {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              name: removeLastChar(previous.name),
+            }));
+            return;
+          }
+          const char = printableChar(key);
+          if (char) {
+            setNewSnapshotValues((previous) => ({
+              ...previous,
+              name: appendText(previous.name, char),
+            }));
+          }
+          return;
+        }
+      }
+    }
   });
 
   usePaste((event) => {
@@ -1557,28 +2440,93 @@ export function App() {
           ]
         : [["ctrl+]", "close session"]];
     }
-    if (page.kind === "sandboxes") {
-      return actionHints(actions, { extra: [["↑/↓", "move"]] });
+    if (page.kind === "sandboxes" || page.kind === "snapshots") {
+      return actionHints(actions, {
+        extra: [
+          ["↑/↓", "move"],
+          ["tab", "switch tab"],
+          ["1/2", "tabs"],
+        ],
+      });
     }
     if (page.kind === "ports") {
       return actionHints(actions, { extra: [["↑/↓", "move"]] });
     }
     if (page.kind === "connect") {
       if (connectField === "submit") {
-        return actionHints(actions, { extra: [["tab", "next field"]] });
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
       }
       return actionHints(
         actions.filter((action) => action.id !== "submit"),
         {
           extra: [
+            ["↑/↓", "field"],
             ["tab", "next field"],
             ["enter", "next field"],
           ],
         },
       );
     }
+    if (page.kind === "create-snapshot") {
+      if (createSnapshotFocus === "submit") {
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
+      }
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+      ];
+      if (createSnapshotFocus === "allow-pause") {
+        extra.push(["space", "toggle"], ["enter", "next field"]);
+      } else {
+        extra.push(["enter", "next field"]);
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
+    }
+    if (page.kind === "new-snapshot") {
+      if (newSnapshotFocus === "submit") {
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
+      }
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+      ];
+      if (newSnapshotFocus === "source") {
+        extra.push(["←/→", "source"], ["enter", "next field"]);
+      } else if (newSnapshotFocus === "dockerfile-mode") {
+        extra.push(["←/→", "mode"], ["enter", "next field"]);
+      } else if (
+        newSnapshotFocus === "dockerfile" &&
+        newSnapshotValues.dockerfileMode === "paste"
+      ) {
+        extra.push(["enter", "newline"]);
+      } else {
+        extra.push(["enter", "next field"]);
+      }
+      return actionHints(
+        actions.filter((action) => action.id !== "submit"),
+        { extra },
+      );
+    }
     if (page.kind === "new-sandbox") {
-      if (imageMenuOpen) {
+      if (imageMenuOpen || snapshotMenuOpen) {
         return [
           ["↑/↓", "move"],
           ["enter", "pick"],
@@ -1586,11 +2534,23 @@ export function App() {
         ];
       }
       if (createFocus === "submit") {
-        return actionHints(actions, { extra: [["tab", "next field"]] });
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
       }
-      const extra: ActionHint[] = [["tab", "next field"]];
-      if (createFocus === "image") {
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+      ];
+      if (createFocus === "image" || createFocus === "image-snapshot") {
         extra.push(["enter", "open list"], ["space", "open list"]);
+      } else if (createFocus === "image-dockerfile-mode") {
+        extra.push(["←/→", "mode"], ["enter", "next field"]);
+      } else if (createFocus === "image-dockerfile" && createValues.dockerfileMode === "paste") {
+        extra.push(["enter", "newline"]);
       } else if (createFocus === "size") {
         extra.push(["←/→", "preset"]);
       } else {
@@ -1610,10 +2570,18 @@ export function App() {
         ];
       }
       if (portForm?.field === "submit") {
-        return actionHints(actions, { extra: [["tab", "next field"]] });
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
       }
       const focusVisibility = portForm?.field === "visibility";
-      const extra: ActionHint[] = [["tab", "next field"]];
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+      ];
       if (focusVisibility) {
         extra.push(["enter", "open list"], ["space", "open list"]);
       } else {
@@ -1626,7 +2594,11 @@ export function App() {
     }
     return actionHints(actions, {
       selection:
-        page.kind === "sandbox" || page.kind === "ssh-details" || page.kind === "delete-sandbox",
+        page.kind === "sandbox" ||
+        page.kind === "snapshot" ||
+        page.kind === "ssh-details" ||
+        page.kind === "delete-sandbox" ||
+        page.kind === "delete-snapshot",
     });
   }, [
     booting,
@@ -1634,10 +2606,15 @@ export function App() {
     actions,
     terminalStatus,
     imageMenuOpen,
+    snapshotMenuOpen,
     createFocus,
     visibilityMenuOpen,
     portForm?.field,
     connectField,
+    createSnapshotFocus,
+    newSnapshotFocus,
+    createValues.dockerfileMode,
+    newSnapshotValues.dockerfileMode,
   ]);
 
   if (booting) {
@@ -1675,6 +2652,9 @@ export function App() {
           focus={createFocus}
           imageMenuOpen={imageMenuOpen}
           imageMenuIndex={imageMenuIndex}
+          snapshotMenuOpen={snapshotMenuOpen}
+          snapshotMenuIndex={snapshotMenuIndex}
+          snapshotMenuOptions={snapshotMenuOptions}
           error={createError}
         />
       );
@@ -1767,14 +2747,72 @@ export function App() {
         />
       );
       break;
-    default:
+    case "snapshot":
       content = (
-        <ListScreen
+        <SnapshotDetailsScreen
+          snapshot={snapshotDetails}
           sandboxes={sandboxes}
-          selected={selected}
-          loading={listLoading}
-          error={listError}
+          loading={snapshotDetailsLoading}
+          error={snapshotDetailsError}
+          groups={[{ actions }]}
+          selectedIndex={selectedActionIndex}
         />
+      );
+      break;
+    case "delete-snapshot":
+      content = (
+        <DeleteSnapshotScreen
+          name={page.name}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "new-snapshot":
+      content = (
+        <NewSnapshotScreen
+          values={newSnapshotValues}
+          focus={newSnapshotFocus}
+          error={newSnapshotError}
+        />
+      );
+      break;
+    case "create-snapshot":
+      content = (
+        <CreateSnapshotScreen
+          label={page.label}
+          name={createSnapshotName}
+          allowPause={createSnapshotAllowPause}
+          focus={createSnapshotFocus}
+          error={createSnapshotError}
+        />
+      );
+      break;
+    case "snapshots":
+      content = (
+        <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+          <HomeTabs active="snapshots" />
+          <SnapshotsScreen
+            snapshots={snapshots}
+            sandboxes={sandboxes}
+            selected={snapshotSelected}
+            loading={snapshotsLoading}
+            error={snapshotsError}
+          />
+        </box>
+      );
+      break;
+    case "sandboxes":
+      content = (
+        <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+          <HomeTabs active="sandboxes" />
+          <ListScreen
+            sandboxes={sandboxes}
+            selected={selected}
+            loading={listLoading}
+            error={listError}
+          />
+        </box>
       );
   }
 
@@ -1796,6 +2834,9 @@ export function App() {
       {content}
       <BusyLine message={busyMessage} frame={SPINNER_FRAMES[spinnerFrame] ?? SPINNER_FRAMES[0]} />
       <KeyHints hints={hints} />
+      {page.kind === "sandboxes" || page.kind === "snapshots" ? (
+        <UsageBar summary={usage} updateVersion={updateNotice?.latestVersion} />
+      ) : null}
     </box>
   );
 }

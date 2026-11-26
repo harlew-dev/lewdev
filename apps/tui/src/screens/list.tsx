@@ -31,10 +31,10 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
   const innerWidth = Math.max(0, width - CARD_CHROME);
   const columns = visibleListColumns(innerWidth);
   const show = (column: (typeof columns)[number]) => columns.includes(column);
-  // Leave room for the card borders, the table header, the separator, the New
-  // sandbox button, the footer and the page chrome so the button is never
-  // pushed out.
-  const visibleRows = Math.max(1, height - 17);
+  // Leave room for the tab bar, card borders, the table header, the separator,
+  // the New sandbox button, the footer, the usage bar and the page chrome so
+  // the button is never pushed out.
+  const visibleRows = Math.max(1, height - 19);
   const start = Math.max(
     0,
     Math.min(selected - Math.floor(visibleRows / 2), sandboxes.length - visibleRows),

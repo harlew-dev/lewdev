@@ -1,18 +1,22 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef } from "react";
 
-import { Field, FormButton } from "../components";
+import { DockerfileContents, Field, FormButton, SegmentedRow } from "../components";
 import {
   type CreateFocus,
   type CreateFormValues,
   createSizeSummary,
-  dockerfileFieldValue,
+  DOCKERFILE_MODE_CHOICES,
+  type ImageOption,
+  IMAGE_MENU_OPTIONS,
   imageFieldValue,
-  IMAGE_OPTIONS,
   imageOptionIndex,
   SIZE_CHOICES,
   sizePreset,
+  snapshotOptionIndex,
 } from "../create-form";
+import { truncate } from "../format";
 import { colors } from "../theme";
 
 interface CreateScreenProps {
@@ -20,13 +24,18 @@ interface CreateScreenProps {
   focus: CreateFocus;
   imageMenuOpen: boolean;
   imageMenuIndex: number;
+  snapshotMenuOpen: boolean;
+  snapshotMenuIndex: number;
+  snapshotMenuOptions: ImageOption[];
   error: string | null;
 }
 
 const FOCUS_IDS: Record<CreateFocus, string> = {
   image: "create-image",
   "image-ref": "create-image-ref",
+  "image-dockerfile-mode": "create-image-dockerfile-mode",
   "image-dockerfile": "create-image-dockerfile",
+  "image-snapshot": "create-image-snapshot",
   size: "create-size",
   "size-cpu": "create-size-cpu",
   "size-memory": "create-size-memory",
@@ -36,9 +45,59 @@ const FOCUS_IDS: Record<CreateFocus, string> = {
 };
 
 const MENU_ROWS = 4;
+/** Page padding, card chrome and the menu cursor column around option text. */
+const MENU_CHROME = 12;
 
 function focusId(focus: CreateFocus): string {
   return FOCUS_IDS[focus];
+}
+
+function OptionMenu({
+  idPrefix,
+  options,
+  start,
+  index,
+  currentIndex,
+  textWidth,
+}: {
+  idPrefix: string;
+  options: ImageOption[];
+  start: number;
+  index: number;
+  currentIndex: number;
+  textWidth: number;
+}) {
+  return (
+    <box flexDirection="column" flexShrink={0}>
+      {options.slice(start, start + MENU_ROWS).map((option, offset) => {
+        const absoluteIndex = start + offset;
+        const isCursor = absoluteIndex === index;
+        const isCurrent = absoluteIndex === currentIndex;
+        const label = truncate(option.label, Math.min(32, textWidth));
+        const remaining = textWidth - label.length - 1;
+        const detail = option.detail && remaining >= 8 ? truncate(option.detail, remaining) : null;
+        return (
+          <box
+            key={option.id}
+            id={`${idPrefix}-${absoluteIndex}`}
+            flexDirection="row"
+            height={1}
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={isCursor ? colors.selection : colors.panelAlt}
+          >
+            <box width={2}>
+              <text fg={isCursor ? colors.accent : colors.muted}>{isCursor ? "›" : " "}</text>
+            </box>
+            <text fg={option.disabled ? colors.muted : isCurrent ? colors.accent : colors.text}>
+              {label}
+            </text>
+            {detail ? <text fg={colors.muted}> {detail}</text> : null}
+          </box>
+        );
+      })}
+    </box>
+  );
 }
 
 export function CreateScreen({
@@ -46,16 +105,29 @@ export function CreateScreen({
   focus,
   imageMenuOpen,
   imageMenuIndex,
+  snapshotMenuOpen,
+  snapshotMenuIndex,
+  snapshotMenuOptions,
   error,
 }: CreateScreenProps) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const { width } = useTerminalDimensions();
+  const menuTextWidth = Math.max(16, width - MENU_CHROME);
   const currentImageIndex = imageOptionIndex(values);
   const menuStart = Math.max(
     0,
-    Math.min(imageMenuIndex - Math.floor(MENU_ROWS / 2), IMAGE_OPTIONS.length - MENU_ROWS),
+    Math.min(imageMenuIndex - Math.floor(MENU_ROWS / 2), IMAGE_MENU_OPTIONS.length - MENU_ROWS),
   );
-  const menuOptions = IMAGE_OPTIONS.slice(menuStart, menuStart + MENU_ROWS);
-  const scrollTarget = imageMenuOpen ? `create-image-option-${imageMenuIndex}` : focusId(focus);
+  const currentSnapshotIndex = snapshotOptionIndex(values.snapshotName, snapshotMenuOptions);
+  const snapshotMenuStart = Math.max(
+    0,
+    Math.min(snapshotMenuIndex - Math.floor(MENU_ROWS / 2), snapshotMenuOptions.length - MENU_ROWS),
+  );
+  const scrollTarget = imageMenuOpen
+    ? `create-image-option-${imageMenuIndex}`
+    : snapshotMenuOpen
+      ? `create-snapshot-option-${snapshotMenuIndex}`
+      : focusId(focus);
 
   useEffect(() => {
     scrollRef.current?.scrollChildIntoView(scrollTarget, { align: "nearest" });
@@ -95,31 +167,14 @@ export function CreateScreen({
             />
 
             {imageMenuOpen ? (
-              <box flexDirection="column" flexShrink={0}>
-                {menuOptions.map((option, index) => {
-                  const absoluteIndex = menuStart + index;
-                  const isCursor = absoluteIndex === imageMenuIndex;
-                  const isCurrent = absoluteIndex === currentImageIndex;
-                  return (
-                    <box
-                      key={option.id}
-                      id={`create-image-option-${absoluteIndex}`}
-                      flexDirection="row"
-                      height={1}
-                      paddingLeft={1}
-                      paddingRight={1}
-                      backgroundColor={isCursor ? colors.selection : colors.panelAlt}
-                    >
-                      <box width={2}>
-                        <text fg={isCursor ? colors.accent : colors.muted}>
-                          {isCursor ? "›" : " "}
-                        </text>
-                      </box>
-                      <text fg={isCurrent ? colors.accent : colors.text}>{option.label}</text>
-                    </box>
-                  );
-                })}
-              </box>
+              <OptionMenu
+                idPrefix="create-image-option"
+                options={IMAGE_MENU_OPTIONS}
+                start={menuStart}
+                index={imageMenuIndex}
+                currentIndex={currentImageIndex}
+                textWidth={menuTextWidth}
+              />
             ) : null}
 
             {values.imageSource === "custom" ? (
@@ -135,13 +190,28 @@ export function CreateScreen({
 
             {values.imageSource === "dockerfile" ? (
               <>
-                <box id="create-image-dockerfile">
-                  <Field
+                <box id="create-image-dockerfile-mode">
+                  <SegmentedRow
                     label="Dockerfile"
-                    value={dockerfileFieldValue(values)}
-                    active={focus === "image-dockerfile"}
-                    placeholder="path/to/Dockerfile"
+                    options={DOCKERFILE_MODE_CHOICES}
+                    selected={values.dockerfileMode}
+                    active={focus === "image-dockerfile-mode"}
                   />
+                </box>
+                <box id="create-image-dockerfile">
+                  {values.dockerfileMode === "file" ? (
+                    <Field
+                      label="Path"
+                      value={values.dockerfilePath}
+                      active={focus === "image-dockerfile"}
+                      placeholder="path/to/Dockerfile"
+                    />
+                  ) : (
+                    <DockerfileContents
+                      contents={values.dockerfileContents}
+                      active={focus === "image-dockerfile"}
+                    />
+                  )}
                 </box>
                 {dockerfileHint ? (
                   <text fg={colors.muted} wrapMode="word">
@@ -149,6 +219,29 @@ export function CreateScreen({
                   </text>
                 ) : null}
               </>
+            ) : null}
+
+            {values.imageSource === "snapshot" ? (
+              <box id="create-image-snapshot" flexDirection="column" gap={1}>
+                <Field
+                  label="Snapshot"
+                  value={values.snapshotName}
+                  active={focus === "image-snapshot"}
+                  cursor={false}
+                  trailing={snapshotMenuOpen ? "▴" : "▾"}
+                  placeholder="choose a snapshot"
+                />
+                {snapshotMenuOpen ? (
+                  <OptionMenu
+                    idPrefix="create-snapshot-option"
+                    options={snapshotMenuOptions}
+                    start={snapshotMenuStart}
+                    index={snapshotMenuIndex}
+                    currentIndex={currentSnapshotIndex}
+                    textWidth={menuTextWidth}
+                  />
+                ) : null}
+              </box>
             ) : null}
           </box>
 

@@ -6,6 +6,18 @@ export function sandboxLabel(sandbox: { id: string; name?: string }): string {
   return sandbox.name && sandbox.name.length > 0 ? sandbox.name : shortId(sandbox.id);
 }
 
+/** The source sandbox's name when it is loaded, otherwise its short id. */
+export function snapshotSourceLabel(
+  snapshot: { sourceSandboxID: string },
+  sandboxes: Array<{ id: string; name?: string }>,
+): string {
+  if (!snapshot.sourceSandboxID) {
+    return "—";
+  }
+  const source = sandboxes.find((sandbox) => sandbox.id === snapshot.sourceSandboxID);
+  return source ? sandboxLabel(source) : shortId(snapshot.sourceSandboxID);
+}
+
 export function truncate(value: string, max: number): string {
   const chars = [...value];
   if (chars.length <= max) {

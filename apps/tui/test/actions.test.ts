@@ -13,6 +13,11 @@ import {
   buildSandboxListActions,
   buildSandboxPageActions,
   buildSandboxPageGroups,
+  buildCreateSnapshotActions,
+  buildNewSnapshotActions,
+  buildSnapshotDeleteActions,
+  buildSnapshotListActions,
+  buildSnapshotPageActions,
   buildSshDetailsActions,
   findActionForKey,
   nextActionId,
@@ -41,6 +46,7 @@ describe("sandbox page actions", () => {
       "ssh",
       "ssh-info",
       "ports",
+      "create-snapshot",
       "back",
     ]);
     expect(actions.find((entry) => entry.id === "ssh")?.label).toBe("Open terminal");
@@ -54,6 +60,7 @@ describe("sandbox page actions", () => {
       ssh: undefined,
       "ssh-info": undefined,
       ports: undefined,
+      "create-snapshot": undefined,
       back: "esc",
     });
     expect(actions.find((entry) => entry.id === "quit")).toBeUndefined();
@@ -109,7 +116,7 @@ describe("sandbox page actions", () => {
   test("disables lifecycle actions while the sandbox is transitioning", () => {
     const actions = buildSandboxPageActions({ ...started, status: "creating" });
 
-    for (const id of ["ssh", "ports", "start", "stop", "restart"] as const) {
+    for (const id of ["ssh", "ports", "create-snapshot", "start", "stop", "restart"] as const) {
       const entry = actions.find((item) => item.id === id);
       expect(entry?.enabled).toBe(false);
       expect(entry?.unavailableReason).toBe(
@@ -139,11 +146,18 @@ describe("sandbox page groups", () => {
       { port: 3000, url: "https://3000.example", visibility: "token" },
     ]);
 
-    expect(groups.map((group) => group.title)).toEqual([undefined, "SSH", "Ports", undefined]);
+    expect(groups.map((group) => group.title)).toEqual([
+      undefined,
+      "SSH",
+      "Ports",
+      "Snapshots",
+      undefined,
+    ]);
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
       ["start", "stop", "restart", "delete"],
       ["ssh", "ssh-info"],
       ["ports"],
+      ["create-snapshot"],
       ["back"],
     ]);
     expect(groups[2]?.ports).toEqual([
@@ -178,6 +192,51 @@ describe("sandbox list actions", () => {
     expect(actions.find((entry) => entry.id === "back")).toBeUndefined();
     expect(findActionForKey(actions, "esc")).toBeUndefined();
     expect(findActionForKey(actions, "s")).toBeUndefined();
+  });
+});
+
+describe("snapshot actions", () => {
+  test("snapshot list mirrors the sandbox list keys", () => {
+    const actions = buildSnapshotListActions();
+
+    expect(actions.map((entry) => entry.id)).toEqual(["open", "new-snapshot", "connect", "quit"]);
+    expect(shortcuts(actions)).toEqual({
+      open: "enter",
+      "new-snapshot": "n",
+      connect: "c",
+      quit: "q",
+    });
+    expect(actions.find((entry) => entry.id === "new-snapshot")?.label).toBe("New snapshot");
+  });
+
+  test("snapshot page offers boot, delete and back", () => {
+    const actions = buildSnapshotPageActions();
+
+    expect(actions.map((entry) => entry.id)).toEqual([
+      "new-sandbox-from-snapshot",
+      "delete-snapshot",
+      "back",
+    ]);
+    expect(actions.find((entry) => entry.id === "delete-snapshot")?.tone).toBe("error");
+    expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
+    expect(actions.filter((entry) => entry.id !== "back").every((entry) => entry.enabled)).toBe(
+      true,
+    );
+  });
+
+  test("snapshot delete confirmation and forms cancel with esc", () => {
+    const confirmation = buildSnapshotDeleteActions();
+    expect(confirmation.map((entry) => entry.id)).toEqual(["confirm-delete-snapshot", "back"]);
+    expect(confirmation.find((entry) => entry.id === "confirm-delete-snapshot")?.tone).toBe(
+      "error",
+    );
+    expect(confirmation.find((entry) => entry.id === "back")?.label).toBe("Cancel");
+
+    for (const actions of [buildNewSnapshotActions(), buildCreateSnapshotActions()]) {
+      expect(actions.find((entry) => entry.id === "submit")?.key).toBe("enter");
+      expect(actions.find((entry) => entry.id === "paste")?.key).toBe("ctrl+v");
+      expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
+    }
   });
 });
 

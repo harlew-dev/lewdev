@@ -1,12 +1,18 @@
+import type { SnapshotInfo } from "@lewdev/core";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-export type ImageSource = "preset" | "custom" | "dockerfile";
+import { formatAge } from "./format";
+
+export type ImageSource = "preset" | "snapshot" | "custom" | "dockerfile";
+export type DockerfileMode = "file" | "paste";
 export type SizeId = "small" | "default" | "large" | "xlarge" | "custom";
 export type CreateFocus =
   | "image"
   | "image-ref"
+  | "image-dockerfile-mode"
   | "image-dockerfile"
+  | "image-snapshot"
   | "size"
   | "size-cpu"
   | "size-memory"
@@ -17,7 +23,9 @@ export type CreateFocus =
 export interface CreateFormValues {
   imageSource: ImageSource;
   image: string;
+  snapshotName: string;
   customImage: string;
+  dockerfileMode: DockerfileMode;
   dockerfilePath: string;
   dockerfileContents: string;
   size: SizeId;
@@ -30,7 +38,9 @@ export interface CreateFormValues {
 export const CREATE_DEFAULT: CreateFormValues = {
   imageSource: "preset",
   image: "ubuntu:24.04",
+  snapshotName: "",
   customImage: "",
+  dockerfileMode: "file",
   dockerfilePath: "",
   dockerfileContents: "",
   size: "default",
@@ -79,14 +89,115 @@ export const CREATE_NAME_FIELD = {
 export interface ImageOption {
   id: string;
   label: string;
-  kind: "preset" | "custom" | "dockerfile";
+  kind: "preset" | "snapshot" | "custom" | "dockerfile";
+  /** Muted trailing text, such as a snapshot's image and age. */
+  detail?: string;
+  disabled?: boolean;
+  snapshotName?: string;
+  cpu?: number;
+  memoryMB?: number;
+  diskGB?: number;
 }
 
-export const IMAGE_OPTIONS: ImageOption[] = [
-  ...IMAGE_PRESETS.map((image) => ({ id: image, label: image, kind: "preset" as const })),
-  { id: "custom-image", label: "Custom image…", kind: "custom" },
-  { id: "dockerfile", label: "Dockerfile…", kind: "dockerfile" },
+const SNAPSHOT_OPTION_PREFIX = "snapshot:";
+const SNAPSHOT_SOURCE_OPTION_ID = "snapshot";
+
+export function snapshotOptionId(name: string): string {
+  return `${SNAPSHOT_OPTION_PREFIX}${name}`;
+}
+
+export function snapshotImageOption(snapshot: SnapshotInfo): ImageOption {
+  return {
+    id: snapshotOptionId(snapshot.name),
+    label: snapshot.name,
+    kind: "snapshot",
+    snapshotName: snapshot.name,
+    detail: `${snapshot.image} · ${formatAge(snapshot.createdAt)}`,
+    ...(snapshot.cpu === undefined ? {} : { cpu: snapshot.cpu }),
+    ...(snapshot.memoryMB === undefined ? {} : { memoryMB: snapshot.memoryMB }),
+    ...(snapshot.diskGB === undefined ? {} : { diskGB: snapshot.diskGB }),
+  };
+}
+
+const PRESET_OPTIONS: ImageOption[] = IMAGE_PRESETS.map((image) => ({
+  id: image,
+  label: image,
+  kind: "preset",
+}));
+
+const CUSTOM_IMAGE_OPTION: ImageOption = {
+  id: "custom-image",
+  label: "Custom image…",
+  kind: "custom",
+};
+
+const DOCKERFILE_OPTION: ImageOption = {
+  id: "dockerfile",
+  label: "Dockerfile…",
+  kind: "dockerfile",
+};
+
+const SNAPSHOT_SOURCE_OPTION: ImageOption = {
+  id: SNAPSHOT_SOURCE_OPTION_ID,
+  label: "Snapshot…",
+  kind: "snapshot",
+};
+
+/** The Image dropdown: Dockerfile, Custom image, Snapshot, then presets. */
+export const IMAGE_MENU_OPTIONS: ImageOption[] = [
+  DOCKERFILE_OPTION,
+  CUSTOM_IMAGE_OPTION,
+  SNAPSHOT_SOURCE_OPTION,
+  ...PRESET_OPTIONS,
 ];
+
+/** The Snapshot row's dropdown: loaded snapshots, or a disabled status row. */
+export function buildSnapshotMenuOptions(
+  snapshots: SnapshotInfo[],
+  snapshotsLoaded: boolean,
+): ImageOption[] {
+  if (!snapshotsLoaded) {
+    return [
+      {
+        id: "snapshots-loading",
+        label: "Loading snapshots…",
+        kind: "snapshot",
+        disabled: true,
+      },
+    ];
+  }
+  if (snapshots.length === 0) {
+    return [
+      {
+        id: "snapshots-empty",
+        label: "No snapshots",
+        kind: "snapshot",
+        disabled: true,
+      },
+    ];
+  }
+  return snapshots.map(snapshotImageOption);
+}
+
+export function menuOptionAt(options: ImageOption[], index: number): ImageOption | undefined {
+  return options[index];
+}
+
+/** Moves to the next selectable option, skipping disabled rows. */
+export function nextMenuIndex(options: ImageOption[], current: number, delta: number): number {
+  if (options.length === 0) {
+    return 0;
+  }
+  let index = Math.min(Math.max(current, 0), options.length - 1);
+  for (let step = 0; step < options.length; step += 1) {
+    index = (index + delta + options.length) % options.length;
+    const option = options[index];
+    if (option && !option.disabled) {
+      return index;
+    }
+  }
+  return Math.min(Math.max(current, 0), options.length - 1);
+}
 
 export function sizePreset(id: SizeId): SizePreset | undefined {
   return SIZE_PRESETS.find((preset) => preset.id === id);
@@ -116,7 +227,9 @@ export function createFocusOrder(values: CreateFormValues): CreateFocus[] {
   if (values.imageSource === "custom") {
     order.push("image-ref");
   } else if (values.imageSource === "dockerfile") {
-    order.push("image-dockerfile");
+    order.push("image-dockerfile-mode", "image-dockerfile");
+  } else if (values.imageSource === "snapshot") {
+    order.push("image-snapshot");
   }
   order.push("size");
   if (values.size === "custom") {
@@ -138,22 +251,42 @@ export function nextCreateFocus(
   return order[next] ?? "image";
 }
 
-export function imageOptionIndex(values: CreateFormValues): number {
+export function imageOptionIndex(
+  values: CreateFormValues,
+  options: ImageOption[] = IMAGE_MENU_OPTIONS,
+): number {
   const id =
     values.imageSource === "custom"
       ? "custom-image"
       : values.imageSource === "dockerfile"
         ? "dockerfile"
-        : values.image;
-  const index = IMAGE_OPTIONS.findIndex((option) => option.id === id);
+        : values.imageSource === "snapshot"
+          ? SNAPSHOT_SOURCE_OPTION_ID
+          : values.image;
+  const index = options.findIndex((option) => option.id === id);
   return Math.max(index, 0);
 }
 
-/** Applies an image dropdown choice to the form. */
+export function snapshotOptionIndex(name: string, options: ImageOption[]): number {
+  const index = options.findIndex(
+    (option) => option.kind === "snapshot" && option.id === snapshotOptionId(name),
+  );
+  if (index >= 0) {
+    return index;
+  }
+  return Math.max(
+    options.findIndex((option) => !option.disabled),
+    0,
+  );
+}
+
+/** Applies an Image dropdown choice to the form. */
 export function selectImageOption(values: CreateFormValues, option: ImageOption): CreateFormValues {
   switch (option.kind) {
     case "preset":
       return { ...values, imageSource: "preset", image: option.id };
+    case "snapshot":
+      return { ...values, imageSource: "snapshot" };
     case "custom":
       return { ...values, imageSource: "custom" };
     case "dockerfile":
@@ -161,11 +294,44 @@ export function selectImageOption(values: CreateFormValues, option: ImageOption)
   }
 }
 
+/** Applies a Snapshot dropdown choice and prefills its size hints. */
+export function selectSnapshotOption(
+  values: CreateFormValues,
+  option: ImageOption,
+): CreateFormValues {
+  if (option.kind !== "snapshot" || option.disabled || !option.snapshotName) {
+    return values;
+  }
+  const selected: CreateFormValues = {
+    ...values,
+    imageSource: "snapshot",
+    snapshotName: option.snapshotName,
+  };
+  const hasHint =
+    option.cpu !== undefined || option.memoryMB !== undefined || option.diskGB !== undefined;
+  if (!hasHint) {
+    return selected;
+  }
+  const preset = sizePreset("default");
+  if (!preset) {
+    return selected;
+  }
+  return {
+    ...selected,
+    size: "custom",
+    customCpu: String(option.cpu ?? preset.cpu),
+    customMemoryGB: String((option.memoryMB ?? preset.memoryMB) / 1024),
+    customDiskGB: String(option.diskGB ?? preset.diskGB),
+  };
+}
+
 /** Label shown on the Image dropdown row. */
 export function imageFieldValue(values: CreateFormValues): string {
   switch (values.imageSource) {
     case "preset":
       return values.image;
+    case "snapshot":
+      return "Snapshot";
     case "custom":
       return "Custom image";
     case "dockerfile":
@@ -174,7 +340,10 @@ export function imageFieldValue(values: CreateFormValues): string {
 }
 
 /** Value of the Dockerfile row below the Image dropdown. */
-export function dockerfileFieldValue(values: CreateFormValues): string {
+export function dockerfileFieldValue(values: {
+  dockerfileContents: string;
+  dockerfilePath: string;
+}): string {
   return values.dockerfileContents
     ? `Pasted Dockerfile · ${pastedDockerfileLines(values.dockerfileContents)} lines`
     : values.dockerfilePath;
@@ -185,6 +354,28 @@ export function pastedDockerfileLines(contents: string): number {
     return 0;
   }
   return contents.replace(/\n+$/, "").split("\n").length;
+}
+
+export const DOCKERFILE_MODE_CHOICES: Array<{ id: DockerfileMode; label: string }> = [
+  { id: "file", label: "From file" },
+  { id: "paste", label: "Paste text" },
+];
+
+export function toggleDockerfileMode(mode: DockerfileMode): DockerfileMode {
+  return mode === "file" ? "paste" : "file";
+}
+
+export function dockerfileModeLabel(mode: DockerfileMode): string {
+  return mode === "file" ? "From file" : "Paste text";
+}
+
+/** The last `max` lines of a Dockerfile, for the clipped Contents preview. */
+export function dockerfilePreviewLines(contents: string, max = 8): string[] {
+  if (contents.length === 0) {
+    return [];
+  }
+  const lines = contents.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+  return lines.slice(-max);
 }
 
 export function expandHomePath(value: string, home: string = homedir()): string {
@@ -207,7 +398,11 @@ export function resolveDockerfilePath(
   return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
 }
 
-function parseOptionalPositive(raw: string, label: string, integer: boolean): number | undefined {
+export function parseOptionalPositive(
+  raw: string,
+  label: string,
+  integer: boolean,
+): number | undefined {
   const trimmed = raw.trim();
   if (!trimmed) {
     return undefined;

@@ -10,6 +10,11 @@ export type ActionId =
   | "ports"
   | "delete"
   | "new"
+  | "new-snapshot"
+  | "create-snapshot"
+  | "delete-snapshot"
+  | "confirm-delete-snapshot"
+  | "new-sandbox-from-snapshot"
   | "connect"
   | "open-port"
   | "close-port"
@@ -71,6 +76,7 @@ export interface SandboxActionContext {
 interface SandboxReasons {
   ssh?: string;
   ports?: string;
+  snapshot?: string;
   start?: string;
   stop?: string;
   restart?: string;
@@ -123,6 +129,7 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
   return {
     ssh: sshReason,
     ports: portsReason,
+    snapshot: blocked,
     start: startReason,
     stop: stopReason,
     restart: restartReason,
@@ -164,6 +171,116 @@ export function buildSandboxListActions(): PageAction[] {
       undefined,
     ),
     action("quit", "Quit", "quit", "q", "Close lewdev.", undefined),
+  ];
+}
+
+/** Actions for the Snapshots list page, acting on the highlighted snapshot. */
+export function buildSnapshotListActions(): PageAction[] {
+  return [
+    action("open", "Open snapshot", "select", "enter", "Open the highlighted snapshot.", undefined),
+    action(
+      "new-snapshot",
+      "New snapshot",
+      "new",
+      "n",
+      "Register a snapshot from an image reference or a Dockerfile.",
+      undefined,
+    ),
+    action(
+      "connect",
+      "Connect / settings",
+      "connect",
+      "c",
+      "Change the API URL and token.",
+      undefined,
+    ),
+    action("quit", "Quit", "quit", "q", "Close lewdev.", undefined),
+  ];
+}
+
+/** Actions on a snapshot page, in the order the list shows them. */
+export function buildSnapshotPageActions(): PageAction[] {
+  return [
+    action(
+      "new-sandbox-from-snapshot",
+      "New sandbox from snapshot",
+      "new sandbox",
+      undefined,
+      "Create a sandbox that boots from this snapshot.",
+      undefined,
+    ),
+    action(
+      "delete-snapshot",
+      "Delete snapshot",
+      "delete",
+      undefined,
+      "Delete the snapshot; this cannot be undone.",
+      undefined,
+      "error",
+    ),
+    action("back", "Back", "back", "esc", "Return to the Snapshots tab.", undefined),
+  ];
+}
+
+/** Actions on the snapshot delete confirmation page. */
+export function buildSnapshotDeleteActions(): PageAction[] {
+  return [
+    action(
+      "confirm-delete-snapshot",
+      "Delete snapshot",
+      "delete",
+      undefined,
+      "Delete the snapshot; this cannot be undone.",
+      undefined,
+      "error",
+    ),
+    action("back", "Cancel", "cancel", "esc", "Keep the snapshot.", undefined),
+  ];
+}
+
+/** Actions on the New snapshot form page. */
+export function buildNewSnapshotActions(): PageAction[] {
+  return [
+    action(
+      "submit",
+      "Register snapshot",
+      "register",
+      "enter",
+      "Register the snapshot with the entered values.",
+      undefined,
+    ),
+    action(
+      "paste",
+      "Paste from clipboard",
+      "paste",
+      "ctrl+v",
+      "Paste into the focused field.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to the Snapshots tab.", undefined),
+  ];
+}
+
+/** Actions on the Create snapshot form page. */
+export function buildCreateSnapshotActions(): PageAction[] {
+  return [
+    action(
+      "submit",
+      "Create snapshot",
+      "create",
+      "enter",
+      "Snapshot the sandbox's disk.",
+      undefined,
+    ),
+    action(
+      "paste",
+      "Paste from clipboard",
+      "paste",
+      "ctrl+v",
+      "Paste into the focused field.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to the sandbox page.", undefined),
   ];
 }
 
@@ -229,6 +346,14 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       "List exposed ports, open a new one, or close one.",
       reasons.ports,
     ),
+    action(
+      "create-snapshot",
+      "Create snapshot",
+      "snapshot",
+      undefined,
+      "Save the sandbox's disk as a reusable snapshot.",
+      reasons.snapshot,
+    ),
     action("back", "Back", "back", "esc", "Return to the sandbox list.", undefined),
   ];
 }
@@ -262,6 +387,7 @@ export function buildSandboxPageGroups(
       ...(portRows.length > 0 ? { ports: portRows } : { note: "No ports open" }),
       actions: collect(["ports"]),
     },
+    { title: "Snapshots", actions: collect(["create-snapshot"]) },
     { actions: collect(["back"]) },
   ];
 }

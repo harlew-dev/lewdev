@@ -11,6 +11,7 @@ import {
   pushSandboxScoped,
   ROOT_PAGE,
   type SandboxPageTarget,
+  SNAPSHOTS_PAGE,
 } from "../src/navigation";
 
 const myBox: SandboxPageTarget = { id: "sb-1", label: "my-box" };
@@ -37,9 +38,14 @@ describe("page stack", () => {
 
   test("reports the sandbox target only for sandbox-scoped pages", () => {
     expect(pageSandbox(ROOT_PAGE)).toBeNull();
+    expect(pageSandbox(SNAPSHOTS_PAGE)).toBeNull();
     expect(pageSandbox({ kind: "connect" })).toBeNull();
     expect(pageSandbox({ kind: "new-sandbox" })).toBeNull();
+    expect(pageSandbox({ kind: "new-snapshot" })).toBeNull();
+    expect(pageSandbox({ kind: "snapshot", name: "base" })).toBeNull();
+    expect(pageSandbox({ kind: "delete-snapshot", name: "base" })).toBeNull();
     expect(pageSandbox({ kind: "sandbox", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "create-snapshot", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "ssh-terminal", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
   });
@@ -89,6 +95,29 @@ describe("breadcrumbs", () => {
         ),
       ),
     ).toEqual(["Sandboxes", "my-box", "Settings", "Forget host key"]);
+  });
+
+  test("names the snapshot tab and pages", () => {
+    expect(breadcrumbTrail([SNAPSHOTS_PAGE])).toEqual(["Snapshots"]);
+    expect(breadcrumbTrail([SNAPSHOTS_PAGE, { kind: "new-snapshot" }])).toEqual([
+      "Snapshots",
+      "New snapshot",
+    ]);
+    expect(breadcrumbTrail([SNAPSHOTS_PAGE, { kind: "snapshot", name: "base" }])).toEqual([
+      "Snapshots",
+      "base",
+    ]);
+    expect(breadcrumbTrail([SNAPSHOTS_PAGE, { kind: "delete-snapshot", name: "base" }])).toEqual([
+      "Snapshots",
+      "Delete snapshot",
+    ]);
+    expect(
+      breadcrumbTrail([
+        ROOT_PAGE,
+        { kind: "sandbox", ...myBox },
+        { kind: "create-snapshot", ...myBox },
+      ]),
+    ).toEqual(["Sandboxes", "my-box", "Create snapshot"]);
   });
 });
 

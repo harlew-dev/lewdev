@@ -5,8 +5,13 @@ export interface SandboxPageTarget {
 
 export type Page =
   | { kind: "sandboxes" }
+  | { kind: "snapshots" }
   | { kind: "connect" }
   | { kind: "new-sandbox" }
+  | { kind: "new-snapshot" }
+  | { kind: "snapshot"; name: string }
+  | { kind: "delete-snapshot"; name: string }
+  | ({ kind: "create-snapshot" } & SandboxPageTarget)
   | ({ kind: "sandbox" } & SandboxPageTarget)
   | ({ kind: "ssh-details" } & SandboxPageTarget)
   | ({ kind: "ports" } & SandboxPageTarget)
@@ -16,11 +21,17 @@ export type Page =
   | ({ kind: "ssh-terminal" } & SandboxPageTarget);
 
 export const ROOT_PAGE: Page = { kind: "sandboxes" };
+export const SNAPSHOTS_PAGE: Page = { kind: "snapshots" };
 
 const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   sandboxes: "Sandboxes",
+  snapshots: "Snapshots",
   connect: "Connect",
   "new-sandbox": "New sandbox",
+  "new-snapshot": "New snapshot",
+  snapshot: null,
+  "delete-snapshot": "Delete snapshot",
+  "create-snapshot": "Create snapshot",
   sandbox: null,
   "ssh-details": "Settings",
   ports: "Ports",
@@ -59,8 +70,12 @@ export function pushSandboxScoped(stack: Page[], next: Page): Page[] {
 export function pageSandbox(page: Page): SandboxPageTarget | null {
   switch (page.kind) {
     case "sandboxes":
+    case "snapshots":
     case "connect":
     case "new-sandbox":
+    case "new-snapshot":
+    case "snapshot":
+    case "delete-snapshot":
       return null;
     default:
       return { id: page.id, label: page.label };
@@ -71,6 +86,9 @@ export function breadcrumbTrail(stack: Page[]): string[] {
   return stack.map((page) => {
     if (page.kind === "sandbox") {
       return page.label;
+    }
+    if (page.kind === "snapshot") {
+      return page.name;
     }
     return CRUMB_LABELS[page.kind] ?? page.kind;
   });

@@ -1,6 +1,7 @@
 import {
   type CallOptions,
   type CreateOptions,
+  type CreateSnapshotOptions,
   type ExposePortOptions,
   type ExposeResult,
   type ExposeVisibility,
@@ -8,8 +9,14 @@ import {
   type HealthStatus,
   Image,
   type ListOptions,
+  type ListSnapshotsOptions,
   MicroVM,
+  type RegisterSnapshotOptions,
+  type SandboxSnapshot,
   type SandboxStatus,
+  type SnapshotList,
+  type TeamQuota,
+  type WhoAmI,
 } from "@aerol-ai/aerolvm-sdk";
 
 import type { LewdevConfig } from "./config.js";
@@ -52,6 +59,18 @@ export interface AerolSdk {
   stop(id: string, call?: CallOptions): Promise<SdkSandbox>;
   destroy(id: string, call?: CallOptions): Promise<void>;
   health(call?: CallOptions): Promise<HealthStatus>;
+  createSnapshot(
+    id: string,
+    name: string,
+    options?: CreateSnapshotOptions,
+    call?: CallOptions,
+  ): Promise<SandboxSnapshot>;
+  registerSnapshot(options: RegisterSnapshotOptions, call?: CallOptions): Promise<SandboxSnapshot>;
+  getSnapshot(name: string, call?: CallOptions): Promise<SandboxSnapshot>;
+  listSnapshots(options?: ListSnapshotsOptions, call?: CallOptions): Promise<SnapshotList>;
+  deleteSnapshot(name: string, call?: CallOptions): Promise<void>;
+  whoami(call?: CallOptions): Promise<WhoAmI>;
+  getTeamQuota(team: string, call?: CallOptions): Promise<TeamQuota>;
 }
 
 export type PortVisibility = Extract<ExposeVisibility, "public" | "token">;
@@ -99,6 +118,91 @@ export interface CreatedSandbox {
   sandbox: SandboxInfo;
   /** Returned by the server only on create; save it immediately. */
   privateKey?: string;
+}
+
+/** A registered snapshot, detached from the SDK's wire type. */
+export interface SnapshotInfo {
+  name: string;
+  image: string;
+  imageID?: string;
+  sourceSandboxID: string;
+  createdAt: string;
+  entrypoint?: string[];
+  regionID?: string;
+  cpu?: number;
+  gpu?: number;
+  memoryMB?: number;
+  diskGB?: number;
+}
+
+export interface CreateSnapshotInput {
+  /** Whether a running sandbox may pause briefly while its disk is copied. */
+  allowPause?: boolean;
+}
+
+/** The caller's identity as the server reports it, without the raw wire type. */
+export interface AccountInfo {
+  role: string;
+  team?: string;
+  expiresAt?: string;
+}
+
+/** A team's quota limits and current server-side usage. */
+export interface TeamQuotaInfo {
+  team: string;
+  maxSandboxes?: number;
+  maxCPU?: number;
+  maxMemoryMB?: number;
+  usage?: {
+    sandboxes: number;
+    cpu: number;
+    memoryMB: number;
+  };
+}
+
+export interface RegisterSnapshotInput {
+  name: string;
+  /** A registry image reference. Mutually exclusive with `dockerfile`. */
+  image?: string;
+  /** Dockerfile contents. Mutually exclusive with `image`. */
+  dockerfile?: string;
+  cpu?: number;
+  memoryMB?: number;
+  diskGB?: number;
+}
+
+/** Snapshot names under this prefix belong to the server, not to callers. */
+export const RESERVED_SNAPSHOT_PREFIX = "aerolvm-snapshot/";
+
+/**
+ * Trims and validates a snapshot name, returning the value to send to the
+ * server. Empty names and the server's reserved prefix are rejected.
+ */
+export function validateSnapshotName(raw: string): string {
+  const name = raw.trim();
+  if (!name) {
+    throw new Error("Snapshot name is required.");
+  }
+  if (name.startsWith(RESERVED_SNAPSHOT_PREFIX)) {
+    throw new Error(`Snapshot names starting with "${RESERVED_SNAPSHOT_PREFIX}" are reserved.`);
+  }
+  return name;
+}
+
+function toSnapshotInfo(snapshot: SandboxSnapshot): SnapshotInfo {
+  return {
+    name: snapshot.name,
+    image: snapshot.image,
+    sourceSandboxID: snapshot.sourceSandboxID,
+    createdAt: snapshot.createdAt,
+    ...(snapshot.imageID === undefined ? {} : { imageID: snapshot.imageID }),
+    ...(snapshot.entrypoint === undefined ? {} : { entrypoint: snapshot.entrypoint }),
+    ...(snapshot.regionID === undefined ? {} : { regionID: snapshot.regionID }),
+    ...(snapshot.cpu === undefined ? {} : { cpu: snapshot.cpu }),
+    ...(snapshot.gpu === undefined ? {} : { gpu: snapshot.gpu }),
+    ...(snapshot.memoryMB === undefined ? {} : { memoryMB: snapshot.memoryMB }),
+    ...(snapshot.diskGB === undefined ? {} : { diskGB: snapshot.diskGB }),
+  };
 }
 
 function toExposedPort(port: SdkExposedPort): ExposedPortInfo {
@@ -241,5 +345,89 @@ export class LewdevApi {
     validatePort(port);
     const sandbox = await this.sdk.get(id);
     await sandbox.unexposePort(port);
+  }
+
+  /** Loads every page of the caller's snapshots, following the name cursor. */
+  async listSnapshots(): Promise<SnapshotInfo[]> {
+    const snapshots: SnapshotInfo[] = [];
+    let startingAfter: string | undefined;
+    for (;;) {
+      const page = await this.sdk.listSnapshots(
+        startingAfter === undefined ? undefined : { startingAfter },
+      );
+      snapshots.push(...page.snapshots.map(toSnapshotInfo));
+      const last = page.snapshots[page.snapshots.length - 1];
+      if (!page.hasMore || last === undefined) {
+        break;
+      }
+      startingAfter = last.name;
+    }
+    return snapshots;
+  }
+
+  async getSnapshot(name: string): Promise<SnapshotInfo> {
+    return toSnapshotInfo(await this.sdk.getSnapshot(validateSnapshotName(name)));
+  }
+
+  async createSnapshot(
+    id: string,
+    name: string,
+    input: CreateSnapshotInput = {},
+  ): Promise<SnapshotInfo> {
+    const normalized = validateSnapshotName(name);
+    const options: CreateSnapshotOptions | undefined =
+      input.allowPause === undefined ? undefined : { allowPause: input.allowPause };
+    return toSnapshotInfo(await this.sdk.createSnapshot(id, normalized, options));
+  }
+
+  async registerSnapshot(input: RegisterSnapshotInput): Promise<SnapshotInfo> {
+    const name = validateSnapshotName(input.name);
+    const image = input.image?.trim() ?? "";
+    const dockerfile = input.dockerfile?.trim() ?? "";
+    if (image && dockerfile) {
+      throw new Error("Provide either an image or a Dockerfile, not both.");
+    }
+    if (!image && !dockerfile) {
+      throw new Error("An image or Dockerfile is required.");
+    }
+
+    const options: RegisterSnapshotOptions = {
+      name,
+      ...(dockerfile ? { dockerfileContent: dockerfile } : { image }),
+    };
+    if (input.cpu !== undefined) {
+      options.cpu = input.cpu;
+    }
+    if (input.memoryMB !== undefined) {
+      options.memoryMB = input.memoryMB;
+    }
+    if (input.diskGB !== undefined) {
+      options.diskGB = input.diskGB;
+    }
+    return toSnapshotInfo(await this.sdk.registerSnapshot(options));
+  }
+
+  async deleteSnapshot(name: string): Promise<void> {
+    await this.sdk.deleteSnapshot(validateSnapshotName(name));
+  }
+
+  async whoami(): Promise<AccountInfo> {
+    const who = await this.sdk.whoami();
+    return {
+      role: who.role,
+      ...(who.team === undefined ? {} : { team: who.team }),
+      ...(who.expiresAt === undefined ? {} : { expiresAt: who.expiresAt }),
+    };
+  }
+
+  async getTeamQuota(team: string): Promise<TeamQuotaInfo> {
+    const quota = await this.sdk.getTeamQuota(team);
+    return {
+      team: quota.team,
+      ...(quota.maxSandboxes === undefined ? {} : { maxSandboxes: quota.maxSandboxes }),
+      ...(quota.maxCPU === undefined ? {} : { maxCPU: quota.maxCPU }),
+      ...(quota.maxMemoryMB === undefined ? {} : { maxMemoryMB: quota.maxMemoryMB }),
+      ...(quota.usage === undefined ? {} : { usage: quota.usage }),
+    };
   }
 }

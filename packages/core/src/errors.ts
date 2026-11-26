@@ -10,6 +10,12 @@ import {
 /** A person-facing, single-line error message. Never includes the API token. */
 export function describeError(error: unknown): string {
   if (error instanceof MicroVMApiError) {
+    if (error.status === 429 && error.code === "team_quota_exceeded") {
+      return "The team quota is full. Delete a sandbox or ask an admin to raise the quota.";
+    }
+    if (error.status === 429 && error.code === "rate_limited") {
+      return "Too many requests. Wait a moment and try again.";
+    }
     const details = [`HTTP ${error.status}`];
     if (error.code) {
       details.push(error.code);
