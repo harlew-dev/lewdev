@@ -11,9 +11,9 @@ const protectWindowsDirectory = Buffer.from(
 $ErrorActionPreference = 'Stop'
 $path = $env:LEWDEV_PRIVATE_DIR
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$acl = Get-Acl -LiteralPath $path
+$acl = [IO.Directory]::GetAccessControl($path)
 $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;$sid)", 'Access')
-Set-Acl -LiteralPath $path -AclObject $acl
+[IO.Directory]::SetAccessControl($path, $acl)
 `,
   "utf16le",
 ).toString("base64");

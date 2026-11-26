@@ -18,7 +18,7 @@ test.skipIf(process.platform !== "win32")(
 $ErrorActionPreference = 'Stop'
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 foreach ($path in ($env:LEWDEV_TEST_CONFIG, $env:LEWDEV_TEST_KEY)) {
-  $acl = Get-Acl -LiteralPath $path
+  $acl = [IO.File]::GetAccessControl($path)
   $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
   if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid) {
     throw "Credential file has unexpected access rules: $path"

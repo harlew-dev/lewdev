@@ -34,7 +34,11 @@ async function defaultSpawn(
   options: ClipboardSpawnOptions,
 ): Promise<ClipboardCommandResult> {
   const isWriter = options.stdin !== undefined;
+  // Windows PowerShell needs its own module paths when launched from PowerShell 7.
+  const env =
+    argv[0] === "powershell.exe" ? { ...process.env, PSModulePath: undefined } : undefined;
   const child = Bun.spawn(argv, {
+    env,
     stdin: isWriter ? new TextEncoder().encode(options.stdin ?? "") : "ignore",
     stdout: isWriter ? "ignore" : "pipe",
     stderr: "ignore",

@@ -49,3 +49,26 @@ jobs:
           cd "$work"
           "./$(basename "$binary")" --version
           "./$(basename "$binary")" --help > /dev/null
+          bun -e '
+            let output = "";
+            let started = false;
+            const child = Bun.spawn([process.argv[1]], {
+              env: { ...process.env, XDG_CONFIG_HOME: process.cwd(), SB_API_URL: "", SB_API_TOKEN: "" },
+              terminal: {
+                cols: 100,
+                rows: 30,
+                data(_, bytes) {
+                  output += Buffer.from(bytes).toString();
+                  if (!started && Bun.stripANSI(output).includes("AerolVM")) {
+                    started = true;
+                    child.kill();
+                  }
+                },
+              },
+            });
+            const timeout = setTimeout(() => child.kill(), 10_000);
+            await child.exited;
+            clearTimeout(timeout);
+            child.terminal?.close();
+            if (!started) throw new Error("Connect screen did not render: " + Bun.stripANSI(output));
+          ' "./$(basename "$binary")"
