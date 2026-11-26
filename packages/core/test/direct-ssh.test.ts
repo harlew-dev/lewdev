@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   addAuthorizedKey,
@@ -170,7 +170,7 @@ describe("direct SSH files", () => {
         execPath: "/usr/bin/bun",
         main: "/work/apps/tui/src/index.tsx",
       }),
-    ).toBe("/usr/bin/bun /work/apps/tui/src/index.tsx");
+    ).toBe(`/usr/bin/bun ${resolve("/work/apps/tui/src/index.tsx").replaceAll("\\", "/")}`);
   });
 
   test("formats a private explicit command with ProxyCommand and HostKeyAlias", () => {
