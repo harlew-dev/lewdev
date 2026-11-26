@@ -166,7 +166,7 @@ import { ForgetHostScreen } from "./screens/forget-host";
 import { ListScreen } from "./screens/list";
 import { NewSnapshotScreen } from "./screens/new-snapshot";
 import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
-import { PORT_VISIBILITY_OPTIONS } from "./port-options";
+import { PORT_PROTOCOL_OPTIONS, PORT_VISIBILITY_OPTIONS, portAddress } from "./port-options";
 import { PortsScreen } from "./screens/ports";
 import { RemoveSshKeyScreen } from "./screens/remove-ssh-key";
 import { ResetSshScreen } from "./screens/reset-ssh";
@@ -197,11 +197,6 @@ import { VERSION } from "./version";
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
 const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "submit"];
-const PORT_FIELDS: [PortFormValues["field"], ...PortFormValues["field"][]] = [
-  "port",
-  "visibility",
-  "submit",
-];
 const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = [
   "name",
   "allow-pause",
@@ -248,6 +243,13 @@ function nextField<T>(fields: [T, ...T[]], current: T, delta: number): T {
   const base = Math.max(index, 0);
   const next = (base + delta + fields.length) % fields.length;
   return fields[next] ?? fields[0];
+}
+
+/** TCP ports have no visibility choice. */
+function portFields(form: PortFormValues): [PortFormValues["field"], ...PortFormValues["field"][]] {
+  return form.protocol === "tcp"
+    ? ["protocol", "port", "submit"]
+    : ["protocol", "port", "visibility", "submit"];
 }
 
 const NO_KEY_REASON =
@@ -386,6 +388,8 @@ export function App() {
   const [portSelected, setPortSelected] = useState(0);
   const [portForm, setPortForm] = useState<PortFormValues | null>(null);
   const [portFormError, setPortFormError] = useState<string | null>(null);
+  const [protocolMenuOpen, setProtocolMenuOpen] = useState(false);
+  const [protocolMenuIndex, setProtocolMenuIndex] = useState(0);
   const [visibilityMenuOpen, setVisibilityMenuOpen] = useState(false);
   const [visibilityMenuIndex, setVisibilityMenuIndex] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
@@ -1310,8 +1314,10 @@ export function App() {
       case "open-port": {
         const target = pageSandbox(page);
         if (target) {
-          setPortForm({ field: "port", port: "", visibility: "public" });
+          setPortForm({ field: "protocol", port: "", protocol: "http", visibility: "public" });
           setPortFormError(null);
+          setProtocolMenuOpen(false);
+          setProtocolMenuIndex(0);
           setVisibilityMenuOpen(false);
           setVisibilityMenuIndex(0);
           pushSandboxScoped({ kind: "open-port", ...target });
@@ -1956,6 +1962,22 @@ export function App() {
     setSnapshotMenuOpen(false);
   }
 
+  function openProtocolMenu(): void {
+    const index = PORT_PROTOCOL_OPTIONS.findIndex((option) => option.value === portForm?.protocol);
+    setProtocolMenuIndex(Math.max(index, 0));
+    setProtocolMenuOpen(true);
+  }
+
+  function chooseProtocol(index: number): void {
+    const option = PORT_PROTOCOL_OPTIONS[index];
+    if (!option) {
+      return;
+    }
+    setPortForm((previous) => (previous ? { ...previous, protocol: option.value } : previous));
+    setProtocolMenuOpen(false);
+    setVisibilityMenuOpen(false);
+  }
+
   function openVisibilityMenu(): void {
     const index = PORT_VISIBILITY_OPTIONS.findIndex(
       (option) => option.value === portForm?.visibility,
@@ -2398,14 +2420,17 @@ export function App() {
     }
 
     setPortFormError(null);
-    setBusyMessage(`Opening port ${port}…`);
+    setBusyMessage(`Opening ${form.protocol === "tcp" ? "TCP " : ""}port ${port}…`);
     try {
-      const opened = await api.openPort(page.id, port, form.visibility);
+      const opened =
+        form.protocol === "tcp"
+          ? await api.openTcpPort(page.id, port)
+          : await api.openPort(page.id, port, form.visibility);
       setPortForm(null);
       await loadDetails(page.id);
       setSelectedActionId(null);
       setStack((previous) => popPage(previous));
-      showToast("success", `Port ${port} opened: ${opened.url}`);
+      showToast("success", `Port ${port} opened: ${portAddress(opened)}`);
     } catch (error) {
       setPortFormError(describeError(error));
     } finally {
@@ -2906,6 +2931,25 @@ export function App() {
     }
 
     if (page.kind === "open-port") {
+      if (protocolMenuOpen) {
+        if (key.name === "down" || actionKey(key) === "j") {
+          setProtocolMenuIndex((index) => Math.min(index + 1, PORT_PROTOCOL_OPTIONS.length - 1));
+          return;
+        }
+        if (key.name === "up" || actionKey(key) === "k") {
+          setProtocolMenuIndex((index) => Math.max(0, index - 1));
+          return;
+        }
+        if (key.name === "return" || key.name === "space") {
+          chooseProtocol(protocolMenuIndex);
+          return;
+        }
+        if (key.name === "escape") {
+          setProtocolMenuOpen(false);
+          return;
+        }
+        return;
+      }
       if (visibilityMenuOpen) {
         if (key.name === "down" || actionKey(key) === "j") {
           setVisibilityMenuIndex((index) =>
@@ -2925,6 +2969,10 @@ export function App() {
           setVisibilityMenuOpen(false);
           return;
         }
+        return;
+      }
+      if (portForm?.field === "protocol" && (key.name === "return" || key.name === "space")) {
+        openProtocolMenu();
         return;
       }
       if (portForm?.field === "visibility" && (key.name === "return" || key.name === "space")) {
@@ -3018,9 +3066,11 @@ export function App() {
         return;
       }
       if (page.kind === "open-port" && portForm && portForm.field !== "submit") {
-        if (portForm.field === "port") {
-          setPortForm((previous) => (previous ? { ...previous, field: "visibility" } : previous));
-        }
+        setPortForm((previous) =>
+          previous
+            ? { ...previous, field: nextField(portFields(previous), previous.field, 1) }
+            : previous,
+        );
         return;
       }
     }
@@ -3190,7 +3240,7 @@ export function App() {
         const delta = key.name === "backtab" || key.shift ? -1 : 1;
         setPortForm((previous) =>
           previous
-            ? { ...previous, field: nextField(PORT_FIELDS, previous.field, delta) }
+            ? { ...previous, field: nextField(portFields(previous), previous.field, delta) }
             : previous,
         );
         return;
@@ -3199,7 +3249,7 @@ export function App() {
         const delta = key.name === "down" ? 1 : -1;
         setPortForm((previous) =>
           previous
-            ? { ...previous, field: nextField(PORT_FIELDS, previous.field, delta) }
+            ? { ...previous, field: nextField(portFields(previous), previous.field, delta) }
             : previous,
         );
         return;
@@ -3531,7 +3581,7 @@ export function App() {
       );
     }
     if (page.kind === "open-port") {
-      if (visibilityMenuOpen) {
+      if (protocolMenuOpen || visibilityMenuOpen) {
         return [
           ["↑/↓", "move"],
           ["enter", "pick"],
@@ -3546,12 +3596,12 @@ export function App() {
           ],
         });
       }
-      const focusVisibility = portForm?.field === "visibility";
+      const focusMenu = portForm?.field === "protocol" || portForm?.field === "visibility";
       const extra: ActionHint[] = [
         ["↑/↓", "field"],
         ["tab", "next field"],
       ];
-      if (focusVisibility) {
+      if (focusMenu) {
         extra.push(["enter", "open list"], ["space", "open list"]);
       } else {
         extra.push(["enter", "next field"]);
@@ -3578,6 +3628,7 @@ export function App() {
     imageMenuOpen,
     snapshotMenuOpen,
     createFocus,
+    protocolMenuOpen,
     visibilityMenuOpen,
     portForm?.field,
     connectField,
@@ -3761,7 +3812,16 @@ export function App() {
     case "open-port":
       content = (
         <OpenPortScreen
-          form={portForm ?? { field: "port", port: "", visibility: "public" }}
+          form={
+            portForm ?? {
+              field: "protocol",
+              port: "",
+              protocol: "http",
+              visibility: "public",
+            }
+          }
+          protocolMenuOpen={protocolMenuOpen}
+          protocolMenuIndex={protocolMenuIndex}
           visibilityMenuOpen={visibilityMenuOpen}
           visibilityMenuIndex={visibilityMenuIndex}
           error={portFormError}

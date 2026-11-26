@@ -1,7 +1,7 @@
 import type { SandboxDetails } from "@lewdev/core";
 import { useTerminalDimensions } from "@opentui/react";
 
-import { visibilityTableLabel } from "../port-options";
+import { portAddress, portTypeLabel } from "../port-options";
 import { colors } from "../theme";
 
 interface PortsScreenProps {
@@ -65,10 +65,10 @@ export function PortsScreen({ details, selected, loading, error }: PortsScreenPr
                   <text fg={colors.muted}>PORT</text>
                 </box>
                 <box width={WIDTHS.visibility}>
-                  <text fg={colors.muted}>VISIBILITY</text>
+                  <text fg={colors.muted}>TYPE</text>
                 </box>
                 <box flexGrow={1}>
-                  <text fg={colors.muted}>URL</text>
+                  <text fg={colors.muted}>ADDRESS</text>
                 </box>
               </box>
 
@@ -81,7 +81,7 @@ export function PortsScreen({ details, selected, loading, error }: PortsScreenPr
               {visible.map((port, index) => {
                 const absoluteIndex = start + index;
                 const isSelected = absoluteIndex === selected;
-                const visibility = visibilityTableLabel(port.visibility);
+                const type = portTypeLabel(port);
                 return (
                   <box
                     key={port.port}
@@ -97,13 +97,21 @@ export function PortsScreen({ details, selected, loading, error }: PortsScreenPr
                       <text fg={colors.text}>{port.port}</text>
                     </box>
                     <box width={WIDTHS.visibility}>
-                      <text fg={port.visibility === "token" ? colors.warning : colors.success}>
-                        {visibility}
+                      <text
+                        fg={
+                          port.protocol === "tcp"
+                            ? colors.accent
+                            : port.visibility === "token"
+                              ? colors.warning
+                              : colors.success
+                        }
+                      >
+                        {type}
                       </text>
                     </box>
                     <box flexGrow={1}>
                       <text fg={colors.accent} selectable>
-                        {port.url}
+                        {portAddress(port)}
                       </text>
                     </box>
                   </box>

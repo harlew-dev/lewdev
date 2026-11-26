@@ -67,6 +67,10 @@ export interface ActionPortRow {
   port: number;
   visibility: "public" | "token";
   url: string;
+  protocol?: "http" | "tcp" | "tls";
+  /** Raw-TCP exposures only. */
+  host?: string;
+  hostPort?: number;
 }
 
 export interface ActionGroup {
@@ -448,6 +452,9 @@ export function buildSandboxPageGroups(
     port: port.port,
     visibility: port.visibility === "token" ? "token" : "public",
     url: port.url,
+    ...(port.protocol === undefined ? {} : { protocol: port.protocol }),
+    ...(port.host === undefined ? {} : { host: port.host }),
+    ...(port.hostPort === undefined ? {} : { hostPort: port.hostPort }),
   }));
 
   return [
@@ -846,7 +853,7 @@ export function buildOpenPortActions(): PageAction[] {
       "Open port",
       "open port",
       "enter",
-      "Expose the port once both fields are filled in.",
+      "Expose the port with the selected protocol once both fields are filled in.",
       undefined,
     ),
     action(

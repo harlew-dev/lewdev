@@ -196,6 +196,13 @@ describe("sandbox page groups", () => {
     const groups = buildSandboxPageGroups(actions, [
       { port: 8080, url: "https://8080.example", visibility: "public" },
       { port: 3000, url: "https://3000.example", visibility: "token" },
+      {
+        port: 25565,
+        url: "tcp://eu.example.test:22042",
+        protocol: "tcp",
+        host: "eu.example.test",
+        hostPort: 22042,
+      },
     ]);
 
     expect(groups.map((group) => group.title)).toEqual([
@@ -217,6 +224,15 @@ describe("sandbox page groups", () => {
     expect(groups[3]?.ports).toEqual([
       { id: "port-8080", port: 8080, url: "https://8080.example", visibility: "public" },
       { id: "port-3000", port: 3000, url: "https://3000.example", visibility: "token" },
+      {
+        id: "port-25565",
+        port: 25565,
+        url: "tcp://eu.example.test:22042",
+        visibility: "public",
+        protocol: "tcp",
+        host: "eu.example.test",
+        hostPort: 22042,
+      },
     ]);
     expect(groups.flatMap((group) => group.actions)).toEqual(actions);
   });

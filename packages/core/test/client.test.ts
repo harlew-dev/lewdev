@@ -409,6 +409,18 @@ describe("LewdevApi", () => {
     ]);
   });
 
+  test("rejects a TCP request the server exposes over another protocol", async () => {
+    const target = sandbox({
+      exposePort: async () => ({ protocol: "http", url: "https://sb.example.com/25565" }),
+    });
+    const { sdk } = fakeSdk({ get: () => target });
+    const api = new LewdevApi(sdk);
+
+    await expect(api.openTcpPort("sb-0123456789abcdef", 25565)).rejects.toThrow(
+      "The server exposed port 25565 as http, not TCP.",
+    );
+  });
+
   test("runs commands and uploads files through the sandbox resource", async () => {
     const calls: Call[] = [];
     const target = sandbox({

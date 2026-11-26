@@ -7,6 +7,7 @@ import { useEffect, useRef } from "react";
 import type { ActionGroup, ActionHint, PageAction } from "./actions";
 import { dockerfilePreviewLines, pastedDockerfileLines } from "./create-form";
 import { shortStatus, truncate } from "./format";
+import { portAddress, portTypeLabel } from "./port-options";
 import { colors, statusColor, statusTint, tints, type ToastTint } from "./theme";
 
 export type ToastKind = "success" | "error" | "warning" | "info";
@@ -527,13 +528,21 @@ export function ActionList({
                   <text fg={colors.muted}>{port.port}</text>
                 </box>
                 <box width={10}>
-                  <text fg={port.visibility === "token" ? colors.warning : colors.success}>
-                    {port.visibility}
+                  <text
+                    fg={
+                      port.protocol === "tcp"
+                        ? colors.accent
+                        : port.visibility === "token"
+                          ? colors.warning
+                          : colors.success
+                    }
+                  >
+                    {portTypeLabel(port)}
                   </text>
                 </box>
                 <box flexGrow={1}>
                   <text fg={colors.muted} selectable>
-                    {port.url}
+                    {portAddress(port)}
                   </text>
                 </box>
               </box>
