@@ -12,6 +12,7 @@ export type Page =
   | { kind: "snapshot"; name: string }
   | { kind: "delete-snapshot"; name: string }
   | ({ kind: "create-snapshot" } & SandboxPageTarget)
+  | ({ kind: "confirm-create-snapshot" } & SandboxPageTarget)
   | ({ kind: "sandbox" } & SandboxPageTarget)
   | ({ kind: "ssh-details" } & SandboxPageTarget)
   | ({ kind: "setup-ssh" } & SandboxPageTarget)
@@ -41,6 +42,7 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   snapshot: null,
   "delete-snapshot": "Delete snapshot",
   "create-snapshot": "Create snapshot",
+  "confirm-create-snapshot": "Confirm snapshot",
   sandbox: null,
   "ssh-details": "Settings",
   "setup-ssh": "Set up SSH",

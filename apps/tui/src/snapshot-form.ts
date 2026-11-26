@@ -1,4 +1,4 @@
-import type { SnapshotInfo } from "@lewdev/core";
+import type { SandboxInfo, SnapshotInfo } from "@lewdev/core";
 
 import {
   CREATE_DEFAULT,
@@ -104,6 +104,16 @@ export function newSnapshotSizeInput(values: NewSnapshotFormValues): {
     input.diskGB = diskGB;
   }
   return input;
+}
+
+/**
+ * A snapshot of a running sandbox pauses it briefly, so ask first. Unknown
+ * statuses ask too; only statuses known not to be running skip the prompt.
+ */
+export function createSnapshotNeedsConfirmation(
+  status: SandboxInfo["status"] | null | undefined,
+): boolean {
+  return status !== "stopped" && status !== "destroyed";
 }
 
 /** Values for the New sandbox form when booting from a snapshot as its image. */

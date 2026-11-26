@@ -46,6 +46,7 @@ describe("page stack", () => {
     expect(pageSandbox({ kind: "delete-snapshot", name: "base" })).toBeNull();
     expect(pageSandbox({ kind: "sandbox", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "create-snapshot", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "confirm-create-snapshot", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "ssh-terminal", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "trust-hosts", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
@@ -128,6 +129,14 @@ describe("breadcrumbs", () => {
         { kind: "create-snapshot", ...myBox },
       ]),
     ).toEqual(["Sandboxes", "my-box", "Create snapshot"]);
+    expect(
+      breadcrumbTrail([
+        ROOT_PAGE,
+        { kind: "sandbox", ...myBox },
+        { kind: "create-snapshot", ...myBox },
+        { kind: "confirm-create-snapshot", ...myBox },
+      ]),
+    ).toEqual(["Sandboxes", "my-box", "Create snapshot", "Confirm snapshot"]);
   });
 });
 

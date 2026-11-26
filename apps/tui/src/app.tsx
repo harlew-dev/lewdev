@@ -85,6 +85,7 @@ import {
   type ActionId,
   buildConnectActions,
   buildCreateSnapshotActions,
+  buildCreateSnapshotConfirmActions,
   buildDeleteActions,
   buildForgetHostActions,
   buildNewSandboxActions,
@@ -155,6 +156,7 @@ import {
   toggleDockerfileMode,
 } from "./create-form";
 import { CreateScreen } from "./screens/create";
+import { ConfirmCreateSnapshotScreen } from "./screens/confirm-create-snapshot";
 import { CreateSnapshotScreen, type CreateSnapshotFocus } from "./screens/create-snapshot";
 import { AddSshKeyScreen } from "./screens/add-ssh-key";
 import { DeleteSandboxScreen } from "./screens/delete-sandbox";
@@ -183,6 +185,7 @@ import {
   SshTerminalScreen,
 } from "./screens/ssh-terminal";
 import {
+  createSnapshotNeedsConfirmation,
   createValuesFromSnapshot,
   NEW_SNAPSHOT_DEFAULT,
   type NewSnapshotFocus,
@@ -197,11 +200,7 @@ import { VERSION } from "./version";
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
 const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "submit"];
-const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = [
-  "name",
-  "allow-pause",
-  "submit",
-];
+const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = ["name", "submit"];
 
 function emptySetupSteps(): SetupSteps {
   return Object.fromEntries(
@@ -364,7 +363,6 @@ export function App() {
   const [snapshotDetailsError, setSnapshotDetailsError] = useState<string | null>(null);
 
   const [createSnapshotName, setCreateSnapshotName] = useState("");
-  const [createSnapshotAllowPause, setCreateSnapshotAllowPause] = useState(true);
   const [createSnapshotFocus, setCreateSnapshotFocus] = useState<CreateSnapshotFocus>("name");
   const [createSnapshotError, setCreateSnapshotError] = useState<string | null>(null);
 
@@ -1028,6 +1026,8 @@ export function App() {
         return buildNewSnapshotActions();
       case "create-snapshot":
         return buildCreateSnapshotActions();
+      case "confirm-create-snapshot":
+        return buildCreateSnapshotConfirmActions();
       case "ssh-details":
         return buildSshDetailsActions({
           canManageHostKeys: gatewayHost !== null,
@@ -1285,13 +1285,15 @@ export function App() {
         const target = actionTarget();
         if (target) {
           setCreateSnapshotName("");
-          setCreateSnapshotAllowPause(true);
           setCreateSnapshotFocus("name");
           setCreateSnapshotError(null);
           pushSandboxScoped({ kind: "create-snapshot", ...target });
         }
         return;
       }
+      case "confirm-create-snapshot":
+        void performCreateSnapshot();
+        return;
       case "new-sandbox-from-snapshot": {
         if (snapshotDetails) {
           openCreateFromSnapshot(snapshotDetails);
@@ -2007,7 +2009,7 @@ export function App() {
         void submitNewSnapshot();
         return;
       case "create-snapshot":
-        void submitCreateSnapshot();
+        submitCreateSnapshot();
         return;
       case "open-port":
         void submitPort();
@@ -2180,8 +2182,32 @@ export function App() {
     }
   }
 
-  async function submitCreateSnapshot(): Promise<void> {
+  function knownSandboxStatus(): SandboxInfo["status"] | null {
+    if (pageDetails) {
+      return pageDetails.status;
+    }
+    return sandboxes.find((sandbox) => sandbox.id === sandboxId)?.status ?? null;
+  }
+
+  function submitCreateSnapshot(): void {
     if (!api || page.kind !== "create-snapshot" || busyMessage) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target) {
+      return;
+    }
+    setCreateSnapshotError(null);
+    if (createSnapshotNeedsConfirmation(knownSandboxStatus())) {
+      push({ kind: "confirm-create-snapshot", ...target });
+      setSelectedActionId("back");
+      return;
+    }
+    void performCreateSnapshot();
+  }
+
+  async function performCreateSnapshot(): Promise<void> {
+    if (!api || busyMessage) {
       return;
     }
     const target = pageSandbox(page);
@@ -2192,17 +2218,30 @@ export function App() {
     setBusyMessage("Creating snapshot…");
     try {
       const created = await api.createSnapshot(target.id, createSnapshotName, {
-        allowPause: createSnapshotAllowPause,
+        allowPause: true,
       });
       setCreateSnapshotName("");
-      setCreateSnapshotAllowPause(true);
       setCreateSnapshotFocus("name");
       setSelectedActionId(null);
-      setStack((previous) => popPage(previous));
+      setStack((previous) => {
+        let next = previous;
+        while (next.length > 1) {
+          const top = currentPage(next);
+          if (top.kind !== "create-snapshot" && top.kind !== "confirm-create-snapshot") {
+            break;
+          }
+          next = popPage(next);
+        }
+        return next;
+      });
       showToast("success", `Snapshot ${created.name} created`);
       void refreshSnapshots(false);
     } catch (error) {
       setCreateSnapshotError(describeError(error));
+      if (page.kind === "confirm-create-snapshot") {
+        setSelectedActionId(null);
+        setStack((previous) => popPage(previous));
+      }
     } finally {
       setBusyMessage(null);
     }
@@ -2830,6 +2869,7 @@ export function App() {
       page.kind === "reset-ssh" ||
       page.kind === "delete-sandbox" ||
       page.kind === "delete-snapshot" ||
+      page.kind === "confirm-create-snapshot" ||
       page.kind === "trust-hosts" ||
       page.kind === "forget-host"
     ) {
@@ -2993,13 +3033,6 @@ export function App() {
         setCreateSnapshotFocus((current) =>
           nextField(CREATE_SNAPSHOT_FIELDS, current, backward ? -1 : 1),
         );
-        return;
-      }
-      if (
-        createSnapshotFocus === "allow-pause" &&
-        (key.name === "space" || key.name === "left" || key.name === "right")
-      ) {
-        setCreateSnapshotAllowPause((value) => !value);
         return;
       }
       if (key.name === "return" && createSnapshotFocus !== "submit") {
@@ -3504,11 +3537,7 @@ export function App() {
         ["↑/↓", "field"],
         ["tab", "next field"],
       ];
-      if (createSnapshotFocus === "allow-pause") {
-        extra.push(["space", "toggle"], ["enter", "next field"]);
-      } else {
-        extra.push(["enter", "next field"]);
-      }
+      extra.push(["enter", "next field"]);
       return actionHints(
         actions.filter((action) => action.id !== "submit"),
         { extra },
@@ -3618,6 +3647,7 @@ export function App() {
         page.kind === "ssh-details" ||
         page.kind === "delete-sandbox" ||
         page.kind === "delete-snapshot" ||
+        page.kind === "confirm-create-snapshot" ||
         page.kind === "trust-hosts",
     });
   }, [
@@ -3918,9 +3948,17 @@ export function App() {
         <CreateSnapshotScreen
           label={page.label}
           name={createSnapshotName}
-          allowPause={createSnapshotAllowPause}
           focus={createSnapshotFocus}
           error={createSnapshotError}
+        />
+      );
+      break;
+    case "confirm-create-snapshot":
+      content = (
+        <ConfirmCreateSnapshotScreen
+          label={page.label}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
         />
       );
       break;

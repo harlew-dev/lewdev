@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SnapshotInfo } from "@lewdev/core";
 
 import {
+  createSnapshotNeedsConfirmation,
   createValuesFromSnapshot,
   NEW_SNAPSHOT_DEFAULT,
   newSnapshotFocusOrder,
@@ -10,6 +11,26 @@ import {
   snapshotSourceLabel,
   toggleSnapshotSource,
 } from "../src/snapshot-form";
+
+describe("create snapshot confirmation", () => {
+  test("asks before pausing a sandbox that may be running", () => {
+    expect(createSnapshotNeedsConfirmation("started")).toBe(true);
+    expect(createSnapshotNeedsConfirmation("creating")).toBe(true);
+    expect(createSnapshotNeedsConfirmation("awaiting_runtime")).toBe(true);
+    expect(createSnapshotNeedsConfirmation("passivated")).toBe(true);
+    expect(createSnapshotNeedsConfirmation("error")).toBe(true);
+  });
+
+  test("asks when the status is unknown", () => {
+    expect(createSnapshotNeedsConfirmation(null)).toBe(true);
+    expect(createSnapshotNeedsConfirmation(undefined)).toBe(true);
+  });
+
+  test("does not ask when the sandbox is known not to be running", () => {
+    expect(createSnapshotNeedsConfirmation("stopped")).toBe(false);
+    expect(createSnapshotNeedsConfirmation("destroyed")).toBe(false);
+  });
+});
 
 describe("new snapshot form", () => {
   test("toggles the source and names both choices", () => {

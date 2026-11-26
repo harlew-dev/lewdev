@@ -28,6 +28,7 @@ export type ActionId =
   | "new"
   | "new-snapshot"
   | "create-snapshot"
+  | "confirm-create-snapshot"
   | "delete-snapshot"
   | "confirm-delete-snapshot"
   | "new-sandbox-from-snapshot"
@@ -328,6 +329,28 @@ export function buildCreateSnapshotActions(): PageAction[] {
       undefined,
     ),
     action("back", "Cancel", "cancel", "esc", "Return to the sandbox page.", undefined),
+  ];
+}
+
+/** Actions on the snapshot confirmation shown before a running sandbox is paused. */
+export function buildCreateSnapshotConfirmActions(): PageAction[] {
+  return [
+    action(
+      "confirm-create-snapshot",
+      "Create snapshot",
+      "create",
+      undefined,
+      "Pause the sandbox briefly while its disk is copied, then create the snapshot.",
+      undefined,
+    ),
+    action(
+      "back",
+      "Cancel",
+      "cancel",
+      "esc",
+      "Return to the form without creating a snapshot.",
+      undefined,
+    ),
   ];
 }
 

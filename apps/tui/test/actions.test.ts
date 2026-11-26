@@ -18,6 +18,7 @@ import {
   buildSandboxPageActions,
   buildSandboxPageGroups,
   buildCreateSnapshotActions,
+  buildCreateSnapshotConfirmActions,
   buildNewSnapshotActions,
   buildSetupSshActions,
   buildSnapshotDeleteActions,
@@ -307,6 +308,15 @@ describe("snapshot actions", () => {
       expect(actions.find((entry) => entry.id === "paste")?.key).toBe("ctrl+v");
       expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
     }
+  });
+
+  test("create snapshot confirmation offers create and cancel", () => {
+    const actions = buildCreateSnapshotConfirmActions();
+
+    expect(actions.map((entry) => entry.id)).toEqual(["confirm-create-snapshot", "back"]);
+    expect(actions.find((entry) => entry.id === "confirm-create-snapshot")?.key).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
+    expect(actions.find((entry) => entry.id === "back")?.label).toBe("Cancel");
   });
 });
 
