@@ -1,8 +1,14 @@
 import {
+  type BinaryLike,
   type CallOptions,
   type CreateOptions,
   type CreateSnapshotOptions,
+  type ExecRequest,
+  type ExecResult,
   type ExposePortOptions,
+  type FileInfo,
+  type FileList,
+  type ListFilesOptions,
   type ExposeResult,
   type ExposeVisibility,
   type GetOptions,
@@ -16,6 +22,7 @@ import {
   type SandboxStatus,
   type SnapshotList,
   type TeamQuota,
+  type UploadFileOptions,
   type WhoAmI,
 } from "@aerol-ai/aerolvm-sdk";
 
@@ -26,7 +33,32 @@ export interface SdkExposedPort {
   port: number;
   publicURL: string;
   visibility?: ExposeVisibility;
+  protocol?: "http" | "tcp" | "tls";
 }
+
+export interface SdkExecStreamOptions {
+  command?: string;
+  argv?: string[];
+  workdir?: string;
+  env?: Record<string, string>;
+  tty?: boolean;
+  cols?: number;
+  rows?: number;
+  onStdout?: (chunk: Uint8Array) => void;
+  onStderr?: (chunk: Uint8Array) => void;
+  onError?: (message: string) => void;
+}
+
+export interface SdkExecStreamHandle {
+  write(data: Uint8Array | string): void;
+  resize(cols: number, rows: number): void;
+  signal(name: string): void;
+  close(): void;
+  done: Promise<{ code: number; signal?: string }>;
+}
+
+/** A sandbox execution runtime; WASM and isolate sandboxes have no shell. */
+export type SandboxRuntime = "docker" | "gvisor" | "kata" | "firecracker" | "wasm" | "isolate";
 
 /** The subset of the SDK's sandbox resource that lewdev uses. */
 export interface SdkSandbox {
@@ -46,8 +78,19 @@ export interface SdkSandbox {
   sshPrivateKey?: string;
   exposedPorts?: SdkExposedPort[];
   lastError?: string;
+  runtime?: SandboxRuntime | "";
   exposePort(port: number, options?: ExposePortOptions, call?: CallOptions): Promise<ExposeResult>;
   unexposePort(port: number, call?: CallOptions): Promise<void>;
+  exec(command: string | ExecRequest, call?: CallOptions): Promise<ExecResult>;
+  execStream(options: SdkExecStreamOptions): SdkExecStreamHandle;
+  listFiles(path: string, options?: ListFilesOptions, call?: CallOptions): Promise<FileList>;
+  getFileInfo(path: string, call?: CallOptions): Promise<FileInfo>;
+  uploadFile(
+    targetPath: string,
+    data: BinaryLike,
+    options?: UploadFileOptions,
+    call?: CallOptions,
+  ): Promise<void>;
 }
 
 /** The subset of `MicroVM` that lewdev depends on. Tests inject a fake. */
@@ -80,6 +123,9 @@ export interface ExposedPortInfo {
   url: string;
   visibility?: PortVisibility;
   protocol?: "http" | "tcp" | "tls";
+  /** Raw-TCP exposures only. */
+  host?: string;
+  hostPort?: number;
 }
 
 export interface SandboxInfo {
@@ -101,6 +147,7 @@ export interface SandboxDetails extends SandboxInfo {
   updatedAt: string;
   lastActiveAt: string;
   sshPublicKey?: string;
+  runtime?: SandboxRuntime | "";
 }
 
 export interface CreateSandboxInput {
@@ -113,6 +160,41 @@ export interface CreateSandboxInput {
   memoryMB?: number;
   diskGB?: number;
 }
+
+export interface SandboxExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+}
+
+export interface SandboxExecStreamOptions {
+  command: string;
+  onStdout?: (chunk: Uint8Array) => void;
+  onStderr?: (chunk: Uint8Array) => void;
+  onError?: (message: string) => void;
+}
+
+export interface SandboxExecStreamHandle {
+  write(data: Uint8Array | string): void;
+  close(): void;
+  signal(name: string): void;
+  done: Promise<{ code: number; signal?: string }>;
+}
+
+export interface SandboxFileEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  symlinkTarget?: string;
+}
+
+export interface SandboxFileList {
+  entries: SandboxFileEntry[];
+  truncated: boolean;
+}
+
+export interface SandboxFileInfo extends SandboxFileEntry {}
 
 export interface CreatedSandbox {
   sandbox: SandboxInfo;
@@ -205,11 +287,33 @@ function toSnapshotInfo(snapshot: SandboxSnapshot): SnapshotInfo {
   };
 }
 
+function tcpAddress(url: string): { host: string; hostPort: number } | null {
+  if (!url.startsWith("tcp://")) {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const hostPort = Number(parsed.port);
+    if (!host || !Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535) {
+      return null;
+    }
+    return { host, hostPort };
+  } catch {
+    return null;
+  }
+}
+
 function toExposedPort(port: SdkExposedPort): ExposedPortInfo {
+  const address = tcpAddress(port.publicURL);
+  const protocol =
+    port.protocol ?? (address ? "tcp" : /^https?:\/\//i.test(port.publicURL) ? "http" : undefined);
   return {
     port: port.port,
     url: port.publicURL,
-    visibility: port.visibility === "token" ? "token" : undefined,
+    ...(port.visibility === "token" ? { visibility: "token" as const } : {}),
+    ...(protocol === undefined ? {} : { protocol }),
+    ...(address === null ? {} : { host: address.host, hostPort: address.hostPort }),
   };
 }
 
@@ -237,6 +341,7 @@ function toDetails(sandbox: SdkSandbox): SandboxDetails {
     updatedAt: sandbox.updatedAt,
     lastActiveAt: sandbox.lastActiveAt,
     sshPublicKey: sandbox.sshPublicKey,
+    ...(sandbox.runtime === undefined ? {} : { runtime: sandbox.runtime }),
   };
 }
 
@@ -345,6 +450,106 @@ export class LewdevApi {
     validatePort(port);
     const sandbox = await this.sdk.get(id);
     await sandbox.unexposePort(port);
+  }
+
+  /** Exposes a container port as raw TCP and returns the host address clients dial. */
+  async openTcpPort(id: string, port: number): Promise<ExposedPortInfo> {
+    validatePort(port);
+    const sandbox = await this.sdk.get(id);
+    const result = await sandbox.exposePort(port, { protocol: "tcp" });
+    if (result.protocol !== "tcp") {
+      throw new Error(`The server exposed port ${port} as ${result.protocol}, not TCP.`);
+    }
+    return {
+      port,
+      url: result.url,
+      protocol: "tcp",
+      host: result.host,
+      hostPort: result.hostPort,
+    };
+  }
+
+  /** Runs a command inside the sandbox and returns its captured output. */
+  async exec(
+    id: string,
+    command: string,
+    options: { timeoutSeconds?: number } = {},
+  ): Promise<SandboxExecResult> {
+    const sandbox = await this.sdk.get(id);
+    const result = await sandbox.exec({
+      command,
+      ...(options.timeoutSeconds === undefined ? {} : { timeoutSeconds: options.timeoutSeconds }),
+    });
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+    };
+  }
+
+  /** Opens a non-PTY command stream, used by the ssh-proxy CLI. */
+  async execStream(
+    id: string,
+    options: SandboxExecStreamOptions,
+  ): Promise<SandboxExecStreamHandle> {
+    const sandbox = await this.sdk.get(id);
+    const handle = sandbox.execStream({
+      command: options.command,
+      tty: false,
+      ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
+      ...(options.onStderr === undefined ? {} : { onStderr: options.onStderr }),
+      ...(options.onError === undefined ? {} : { onError: options.onError }),
+    });
+    return {
+      write: (data) => handle.write(data),
+      close: () => handle.close(),
+      signal: (name) => handle.signal(name),
+      done: handle.done.then((info: { code: number; signal?: string }) => ({
+        code: info.code,
+        ...(info.signal === undefined ? {} : { signal: info.signal }),
+      })),
+    };
+  }
+
+  async listFiles(
+    id: string,
+    path: string,
+    options: ListFilesOptions = {},
+  ): Promise<SandboxFileList> {
+    const sandbox = await this.sdk.get(id);
+    const result = await sandbox.listFiles(path, options);
+    return {
+      entries: result.entries.map((entry) => ({
+        name: entry.name,
+        path: entry.path,
+        isDir: entry.isDir,
+        ...(entry.symlinkTarget === undefined ? {} : { symlinkTarget: entry.symlinkTarget }),
+      })),
+      truncated: result.truncated,
+    };
+  }
+
+  async getFileInfo(id: string, path: string): Promise<SandboxFileInfo> {
+    const sandbox = await this.sdk.get(id);
+    const info = await sandbox.getFileInfo(path);
+    return {
+      name: info.name,
+      path: info.path,
+      isDir: info.isDir,
+      ...(info.symlinkTarget === undefined ? {} : { symlinkTarget: info.symlinkTarget }),
+    };
+  }
+
+  /** Uploads text to a path inside the sandbox. */
+  async uploadFile(
+    id: string,
+    targetPath: string,
+    data: string | Uint8Array,
+    options: UploadFileOptions = {},
+  ): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.uploadFile(targetPath, data, options);
   }
 
   /** Loads every page of the caller's snapshots, following the name cursor. */

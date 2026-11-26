@@ -4,21 +4,28 @@ import {
   actionHints,
   actionIndex,
   actionKey,
+  buildAddSshKeyActions,
   buildConnectActions,
   buildDeleteActions,
+  buildDisableSshActions,
   buildForgetHostActions,
   buildNewSandboxActions,
   buildOpenPortActions,
   buildPortsPageActions,
+  buildRemoveSshKeyActions,
+  buildResetSshActions,
   buildSandboxListActions,
   buildSandboxPageActions,
   buildSandboxPageGroups,
   buildCreateSnapshotActions,
   buildNewSnapshotActions,
+  buildSetupSshActions,
   buildSnapshotDeleteActions,
   buildSnapshotListActions,
   buildSnapshotPageActions,
   buildSshDetailsActions,
+  buildSshIncludeActions,
+  buildTrustHostActions,
   findActionForKey,
   nextActionId,
   type PageAction,
@@ -28,6 +35,8 @@ const started = {
   status: "started" as const,
   keyAvailable: true,
   sshCommandAvailable: true,
+  hasShell: true,
+  directReady: true,
 };
 
 function shortcuts(actions: PageAction[]): Record<string, string | undefined> {
@@ -44,6 +53,9 @@ describe("sandbox page actions", () => {
       "restart",
       "delete",
       "ssh",
+      "setup-ssh",
+      "open-vscode",
+      "copy-ssh",
       "ssh-info",
       "ports",
       "create-snapshot",
@@ -58,6 +70,9 @@ describe("sandbox page actions", () => {
       restart: undefined,
       delete: undefined,
       ssh: undefined,
+      "setup-ssh": undefined,
+      "open-vscode": undefined,
+      "copy-ssh": undefined,
       "ssh-info": undefined,
       ports: undefined,
       "create-snapshot": undefined,
@@ -67,6 +82,14 @@ describe("sandbox page actions", () => {
     expect(actions.filter((entry) => entry.id !== "start").every((entry) => entry.enabled)).toBe(
       true,
     );
+  });
+
+  test("hides Set up SSH once a config block exists", () => {
+    const actions = buildSandboxPageActions({ ...started, sshConfigured: true });
+    expect(actions.find((entry) => entry.id === "setup-ssh")).toBeUndefined();
+    expect(
+      actions.filter((entry) => entry.id === "open-vscode" || entry.id === "copy-ssh"),
+    ).toHaveLength(2);
   });
 
   test("disables start and enables stop while running", () => {
@@ -113,10 +136,39 @@ describe("sandbox page actions", () => {
     );
   });
 
+  test("disables direct SSH until setup has run", () => {
+    const actions = buildSandboxPageActions({ ...started, directReady: false });
+    for (const id of ["open-vscode", "copy-ssh"] as const) {
+      expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
+        'SSH is not set up yet. Choose "Set up SSH" first.',
+      );
+    }
+    expect(actions.find((entry) => entry.id === "setup-ssh")?.enabled).toBe(true);
+  });
+
+  test("disables SSH setup on sandboxes without a shell", () => {
+    const actions = buildSandboxPageActions({ ...started, hasShell: false });
+    for (const id of ["setup-ssh", "open-vscode", "copy-ssh"] as const) {
+      expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
+        "This sandbox has no shell, so it cannot run sshd.",
+      );
+    }
+  });
+
   test("disables lifecycle actions while the sandbox is transitioning", () => {
     const actions = buildSandboxPageActions({ ...started, status: "creating" });
 
-    for (const id of ["ssh", "ports", "create-snapshot", "start", "stop", "restart"] as const) {
+    for (const id of [
+      "ssh",
+      "setup-ssh",
+      "open-vscode",
+      "copy-ssh",
+      "ports",
+      "create-snapshot",
+      "start",
+      "stop",
+      "restart",
+    ] as const) {
       const entry = actions.find((item) => item.id === id);
       expect(entry?.enabled).toBe(false);
       expect(entry?.unavailableReason).toBe(
@@ -148,6 +200,7 @@ describe("sandbox page groups", () => {
 
     expect(groups.map((group) => group.title)).toEqual([
       undefined,
+      "Terminal",
       "SSH",
       "Ports",
       "Snapshots",
@@ -155,12 +208,13 @@ describe("sandbox page groups", () => {
     ]);
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
       ["start", "stop", "restart", "delete"],
-      ["ssh", "ssh-info"],
+      ["ssh"],
+      ["setup-ssh", "open-vscode", "copy-ssh", "ssh-info"],
       ["ports"],
       ["create-snapshot"],
       ["back"],
     ]);
-    expect(groups[2]?.ports).toEqual([
+    expect(groups[3]?.ports).toEqual([
       { id: "port-8080", port: 8080, url: "https://8080.example", visibility: "public" },
       { id: "port-3000", port: 3000, url: "https://3000.example", visibility: "token" },
     ]);
@@ -286,20 +340,105 @@ describe("other page actions", () => {
     }
   });
 
-  test("settings lists copy, forget and back without letter shortcuts", () => {
-    const actions = buildSshDetailsActions({ canForgetHost: true });
-    expect(actions.map((entry) => entry.id)).toEqual(["copy-ssh", "forget-host", "back"]);
+  test("settings lists direct SSH, gateway and back actions without letter shortcuts", () => {
+    const actions = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: true,
+      hasKeys: true,
+    });
+    expect(actions.map((entry) => entry.id)).toEqual([
+      "copy-ssh",
+      "add-ssh-key",
+      "remove-ssh-key",
+      "disable-ssh",
+      "repair-ssh",
+      "reset-ssh",
+      "trust-hosts",
+      "forget-host",
+      "back",
+    ]);
     expect(actions.find((entry) => entry.id === "copy-ssh")?.key).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "trust-hosts")?.key).toBeUndefined();
     expect(actions.find((entry) => entry.id === "forget-host")?.key).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "disable-ssh")?.tone).toBe("error");
     expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
     expect(actions.find((entry) => entry.id === "quit")).toBeUndefined();
   });
 
-  test("disables forgetting the host key without a gateway host", () => {
-    const actions = buildSshDetailsActions({ canForgetHost: false });
-    expect(actions.find((entry) => entry.id === "forget-host")?.unavailableReason).toBe(
-      "The SSH host could not be derived from the configured API URL.",
+  test("Reset SSH stays available while running even when SSH is broken", () => {
+    const broken = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: false,
+      hasKeys: false,
+      running: true,
+      hasShell: true,
+    });
+    expect(broken.find((entry) => entry.id === "reset-ssh")?.enabled).toBe(true);
+    expect(broken.find((entry) => entry.id === "reset-ssh")?.tone).toBe("error");
+    expect(broken.find((entry) => entry.id === "repair-ssh")?.enabled).toBe(true);
+
+    const stopped = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: false,
+      hasKeys: false,
+      running: false,
+      hasShell: true,
+    });
+    expect(stopped.find((entry) => entry.id === "reset-ssh")?.unavailableReason).toBe(
+      "The sandbox must be running to reset SSH.",
     );
+  });
+
+  test("settings switch depends on the current mode", () => {
+    const privateMode = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: true,
+      hasKeys: true,
+      running: true,
+      hasShell: true,
+      mode: "private",
+    });
+    expect(privateMode.find((entry) => entry.id === "enable-public-ssh")?.label).toBe(
+      "Enable public TCP port",
+    );
+    expect(privateMode.find((entry) => entry.id === "enable-public-ssh")?.tone).toBe("error");
+
+    const publicMode = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: true,
+      hasKeys: true,
+      running: true,
+      hasShell: true,
+      mode: "public",
+    });
+    expect(publicMode.find((entry) => entry.id === "use-private-ssh")?.label).toBe(
+      "Use private connection",
+    );
+    expect(publicMode.find((entry) => entry.id === "enable-public-ssh")).toBeUndefined();
+  });
+
+  test("disables trusting and forgetting host keys without a gateway host", () => {
+    const actions = buildSshDetailsActions({
+      canManageHostKeys: false,
+      directReady: true,
+      hasKeys: true,
+    });
+    for (const id of ["trust-hosts", "forget-host"] as const) {
+      expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
+        "The SSH host could not be derived from the configured API URL.",
+      );
+    }
+  });
+
+  test("trust confirmation offers trust and cancel", () => {
+    const actions = buildTrustHostActions();
+    expect(actions.map((entry) => entry.id)).toEqual(["confirm-trust-hosts", "back"]);
+    expect(actions.find((entry) => entry.id === "confirm-trust-hosts")?.label).toBe(
+      "Trust these keys",
+    );
+    expect(actions.find((entry) => entry.id === "confirm-trust-hosts")?.tone).toBe("default");
+    expect(actions.find((entry) => entry.id === "back")?.label).toBe("Cancel");
+    expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
   });
 
   test("forget confirmation offers forget and cancel", () => {
@@ -308,6 +447,59 @@ describe("other page actions", () => {
     expect(actions.find((entry) => entry.id === "confirm-forget")?.tone).toBe("error");
     expect(actions.find((entry) => entry.id === "back")?.label).toBe("Cancel");
     expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
+  });
+});
+
+describe("direct SSH pages", () => {
+  test("setup page offers private first and public second, and finishes", () => {
+    const confirm = buildSetupSshActions({ running: false, completed: false, failed: false });
+    expect(confirm.map((entry) => entry.id)).toEqual([
+      "confirm-setup-private",
+      "confirm-setup-public",
+      "back",
+    ]);
+    expect(confirm.find((entry) => entry.id === "confirm-setup-private")?.label).toBe(
+      "Set up private SSH",
+    );
+    expect(confirm.find((entry) => entry.id === "confirm-setup-public")?.tone).toBe("error");
+
+    expect(buildSetupSshActions({ running: true, completed: false, failed: false })).toEqual([]);
+    const done = buildSetupSshActions({ running: false, completed: true, failed: false });
+    expect(done.map((entry) => entry.id)).toEqual(["back"]);
+    expect(done.find((entry) => entry.id === "back")?.label).toBe("Done");
+  });
+
+  test("reset confirmation offers reset and cancel", () => {
+    const actions = buildResetSshActions();
+    expect(actions.map((entry) => entry.id)).toEqual(["confirm-reset-ssh", "back"]);
+    expect(actions.find((entry) => entry.id === "confirm-reset-ssh")?.tone).toBe("error");
+    expect(actions.find((entry) => entry.id === "back")?.label).toBe("Cancel");
+  });
+
+  test("include, add key and disable pages cancel with esc", () => {
+    expect(buildSshIncludeActions().map((entry) => entry.id)).toEqual(["confirm-include", "back"]);
+    expect(buildAddSshKeyActions().map((entry) => entry.id)).toEqual(["submit", "paste", "back"]);
+    expect(buildDisableSshActions().map((entry) => entry.id)).toEqual([
+      "confirm-disable-ssh",
+      "back",
+    ]);
+    expect(buildDisableSshActions().find((entry) => entry.id === "confirm-disable-ssh")?.tone).toBe(
+      "error",
+    );
+  });
+
+  test("remove key warns about lewdev's key and requires a key", () => {
+    const normal = buildRemoveSshKeyActions({ hasKeys: true, isLewdev: false });
+    expect(normal.map((entry) => entry.id)).toEqual(["confirm-remove-ssh-key", "back"]);
+    expect(normal.find((entry) => entry.id === "confirm-remove-ssh-key")?.label).toBe("Remove key");
+
+    const own = buildRemoveSshKeyActions({ hasKeys: true, isLewdev: true });
+    expect(own.find((entry) => entry.id === "confirm-remove-ssh-key")?.label).toBe(
+      "Remove lewdev key",
+    );
+
+    const empty = buildRemoveSshKeyActions({ hasKeys: false, isLewdev: false });
+    expect(empty.find((entry) => entry.id === "confirm-remove-ssh-key")?.enabled).toBe(false);
   });
 });
 
@@ -357,7 +549,7 @@ describe("action selection and hints", () => {
   });
 
   test("keeps the selected id across a rebuild and wraps", () => {
-    expect(actionIndex(actions, "ports")).toBe(6);
+    expect(actionIndex(actions, "ports")).toBe(9);
     expect(actionIndex(actions, "missing" as never)).toBe(0);
     // With nothing selected, the first enabled action wins: Start is disabled while running.
     expect(actionIndex(actions, null)).toBe(1);

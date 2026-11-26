@@ -1,32 +1,69 @@
 import {
   type AccountInfo,
+  addAuthorizedKey,
+  addSshInclude,
+  type AuthorizedKey,
   backgroundUpdateCheck,
   buildSshArgv,
+  cleanupDirectSsh,
+  completeRemotePath,
   type CreateSandboxInput,
   deletePrivateKey,
   describeError,
+  type DirectSshConfigBlock,
+  type DirectSshMode,
+  type DirectSshProgress,
+  type DirectSshSetupResult,
+  DIRECT_SSH_STEPS,
+  disableDirectSsh,
+  directKeyExists,
+  enablePublicDirectSsh,
   ensureKnownHostsFile,
+  ensureSshdRunning,
   forgetHostKey,
-  formatSshCommand,
+  formatDirectSshCommand,
+  formatExplicitSshCommand,
+  type GatewayHostKeyScan,
   getConfigPath,
+  getDirectKeyPath,
+  getDirectSshAlias,
   getKeyPath,
   getKnownHostsPath,
+  getSshConfigPath,
+  getSshIncludeLine,
+  hasSshInclude,
+  isHiddenRemoteName,
   isStandaloneBuild,
+  isSshdRunning,
   knownHostsEntry,
   LewdevApi,
   type LewdevConfig,
   loadConfig,
   normalizeApiUrl,
+  joinRemotePath,
+  parentRemotePath,
   privateKeyExists,
+  readAuthorizedKeys,
+  readDirectPublicKey,
+  readDirectSshConfigBlock,
   type RegisterSnapshotInput,
+  remotePathForUrl,
+  removeAuthorizedKey,
+  resetDirectSsh,
+  resolveRemotePath,
   type SandboxDetails,
+  type SandboxFileEntry,
   type SandboxInfo,
   saveConfig,
+  saveGatewayHostKeys,
   savePrivateKey,
+  scanGatewayHostKeys,
+  setupDirectSsh,
   type SnapshotInfo,
   SSH_PORT,
   sshHostFromApiUrl,
   summarizeUsage,
+  switchToPrivateSsh,
   type TeamQuotaInfo,
   type UpdateNotice,
   type UsageSummary,
@@ -34,7 +71,9 @@ import {
 import type { KeyEvent } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
 import { useKeyboard, usePaste, useRenderer } from "@opentui/react";
+import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -54,11 +93,19 @@ import {
   buildPortsPageActions,
   buildSandboxListActions,
   buildSandboxPageActions,
+  buildAddSshKeyActions,
+  buildDisableSshActions,
+  buildEnablePublicSshActions,
+  buildRemoveSshKeyActions,
+  buildResetSshActions,
   buildSandboxPageGroups,
+  buildSetupSshActions,
   buildSnapshotDeleteActions,
   buildSnapshotListActions,
   buildSnapshotPageActions,
   buildSshDetailsActions,
+  buildSshIncludeActions,
+  buildTrustHostActions,
   findActionForKey,
   nextActionId,
   type PageAction,
@@ -109,18 +156,27 @@ import {
 } from "./create-form";
 import { CreateScreen } from "./screens/create";
 import { CreateSnapshotScreen, type CreateSnapshotFocus } from "./screens/create-snapshot";
+import { AddSshKeyScreen } from "./screens/add-ssh-key";
 import { DeleteSandboxScreen } from "./screens/delete-sandbox";
 import { DeleteSnapshotScreen } from "./screens/delete-snapshot";
 import { DetailsScreen } from "./screens/details";
+import { DisableSshScreen } from "./screens/disable-ssh";
+import { EnablePublicSshScreen } from "./screens/enable-public-ssh";
 import { ForgetHostScreen } from "./screens/forget-host";
 import { ListScreen } from "./screens/list";
 import { NewSnapshotScreen } from "./screens/new-snapshot";
 import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
 import { PORT_VISIBILITY_OPTIONS } from "./port-options";
 import { PortsScreen } from "./screens/ports";
+import { RemoveSshKeyScreen } from "./screens/remove-ssh-key";
+import { ResetSshScreen } from "./screens/reset-ssh";
 import { SnapshotDetailsScreen } from "./screens/snapshot-details";
 import { SnapshotsScreen } from "./screens/snapshots";
+import { SetupSshScreen, type SetupSteps } from "./screens/setup-ssh";
 import { SshDetailsScreen } from "./screens/ssh-details";
+import { SshIncludeScreen } from "./screens/ssh-include";
+import { VscodeDirectoryScreen } from "./screens/vscode-directory";
+import { TrustHostsScreen } from "./screens/trust-hosts";
 import {
   type SshExitResult,
   type SshSessionHandle,
@@ -151,6 +207,41 @@ const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = 
   "allow-pause",
   "submit",
 ];
+
+function emptySetupSteps(): SetupSteps {
+  return Object.fromEntries(
+    DIRECT_SSH_STEPS.map((step) => [step.id, { status: "pending" }]),
+  ) as SetupSteps;
+}
+
+interface DirectSshInfo {
+  keyAvailable: boolean;
+  block: DirectSshConfigBlock | null;
+  includePresent: boolean;
+  sshdRunning: boolean | null;
+}
+
+interface VscodeDirState {
+  currentDir: string;
+  pathInput: string;
+  entries: SandboxFileEntry[];
+  truncated: boolean;
+  loading: boolean;
+  error: string | null;
+  selected: number;
+  showHidden: boolean;
+}
+
+const EMPTY_VSCODE_DIR: VscodeDirState = {
+  currentDir: "/root",
+  pathInput: "/root",
+  entries: [],
+  truncated: false,
+  loading: false,
+  error: null,
+  selected: 0,
+  showHidden: false,
+};
 
 function nextField<T>(fields: [T, ...T[]], current: T, delta: number): T {
   const index = fields.indexOf(current);
@@ -299,6 +390,23 @@ export function App() {
   const [visibilityMenuIndex, setVisibilityMenuIndex] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
+  const [hostKeyScan, setHostKeyScan] = useState<GatewayHostKeyScan | null>(null);
+
+  const [directInfo, setDirectInfo] = useState<DirectSshInfo | null>(null);
+  const [authorizedKeys, setAuthorizedKeys] = useState<AuthorizedKey[]>([]);
+  const [authorizedKeysLoading, setAuthorizedKeysLoading] = useState(false);
+  const [authorizedKeysError, setAuthorizedKeysError] = useState<string | null>(null);
+  const [setupSteps, setSetupSteps] = useState<SetupSteps>(emptySetupSteps);
+  const [setupRunning, setSetupRunning] = useState(false);
+  const [setupMode, setSetupMode] = useState<DirectSshMode>("private");
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [setupResult, setSetupResult] = useState<DirectSshSetupResult | null>(null);
+  const [newSshKey, setNewSshKey] = useState("");
+  const [addSshKeyError, setAddSshKeyError] = useState<string | null>(null);
+  const [sshKeySelected, setSshKeySelected] = useState(0);
+  const [removeSshKeyError, setRemoveSshKeyError] = useState<string | null>(null);
+  const [vscodeDir, setVscodeDir] = useState<VscodeDirState>(EMPTY_VSCODE_DIR);
+  const lastVscodeDir = useRef<Record<string, string>>({});
 
   const sshSession = useRef<SshSessionHandle | null>(null);
   const stackRef = useRef(stack);
@@ -310,6 +418,14 @@ export function App() {
   const usesDetails =
     page.kind === "sandbox" ||
     page.kind === "ssh-details" ||
+    page.kind === "setup-ssh" ||
+    page.kind === "ssh-include" ||
+    page.kind === "add-ssh-key" ||
+    page.kind === "remove-ssh-key" ||
+    page.kind === "disable-ssh" ||
+    page.kind === "reset-ssh" ||
+    page.kind === "enable-public-ssh" ||
+    page.kind === "vscode-directory" ||
     page.kind === "ports" ||
     page.kind === "open-port";
   const pageDetails = details && details.id === sandboxId ? details : null;
@@ -401,6 +517,48 @@ export function App() {
         setDetailsError(describeError(error));
       } finally {
         setDetailsLoading(false);
+      }
+    },
+    [api],
+  );
+
+  const refreshDirectSshState = useCallback(
+    async (id: string, checkRunning: boolean): Promise<void> => {
+      try {
+        const [keyAvailable, block, includePresent, sshdRunning] = await Promise.all([
+          directKeyExists(id),
+          readDirectSshConfigBlock(id),
+          hasSshInclude(),
+          checkRunning && api ? isSshdRunning(api, id).catch(() => false) : Promise.resolve(false),
+        ]);
+        setDirectInfo({ keyAvailable, block, includePresent, sshdRunning });
+      } catch {
+        setDirectInfo({
+          keyAvailable: false,
+          block: null,
+          includePresent: false,
+          sshdRunning: false,
+        });
+      }
+    },
+    [api],
+  );
+
+  const refreshAuthorizedKeys = useCallback(
+    async (id: string): Promise<void> => {
+      if (!api) {
+        return;
+      }
+      setAuthorizedKeysLoading(true);
+      try {
+        const publicKey = await readDirectPublicKey(id);
+        const keys = await readAuthorizedKeys(api, id, publicKey ?? undefined);
+        setAuthorizedKeys(keys);
+        setAuthorizedKeysError(null);
+      } catch (error) {
+        setAuthorizedKeysError(describeError(error));
+      } finally {
+        setAuthorizedKeysLoading(false);
       }
     },
     [api],
@@ -674,9 +832,39 @@ export function App() {
   }, [pageDetails]);
 
   useEffect(() => {
+    if (sandboxId === null) {
+      return;
+    }
+    setAuthorizedKeys([]);
+    setAuthorizedKeysError(null);
+    setSshKeySelected(0);
+  }, [sandboxId]);
+
+  useEffect(() => {
+    if (!pageDetails) {
+      setDirectInfo(null);
+      return;
+    }
+    void refreshDirectSshState(pageDetails.id, pageDetails.status === "started");
+  }, [pageDetails, refreshDirectSshState]);
+
+  useEffect(() => {
+    if (!sandboxId || (page.kind !== "ssh-details" && page.kind !== "remove-ssh-key")) {
+      return;
+    }
+    void refreshAuthorizedKeys(sandboxId);
+  }, [sandboxId, page.kind, refreshAuthorizedKeys]);
+
+  useEffect(() => {
     const count = pageDetails?.exposedPorts.length ?? 0;
     setPortSelected((previous) => Math.min(previous, count));
   }, [pageDetails]);
+
+  useEffect(() => {
+    setSshKeySelected((previous) =>
+      authorizedKeys.length === 0 ? 0 : Math.min(previous, authorizedKeys.length - 1),
+    );
+  }, [authorizedKeys.length]);
 
   useEffect(() => {
     if (!toast) {
@@ -705,21 +893,55 @@ export function App() {
     };
   }, [busyMessage]);
 
-  const sshCommand = useMemo(() => {
-    if (!pageDetails || !config) {
+  const directPort = useMemo(
+    () =>
+      pageDetails?.exposedPorts.find(
+        (port) => port.port === 22 && (port.protocol === "tcp" || port.host !== undefined),
+      ),
+    [pageDetails],
+  );
+
+  const directMode = directInfo?.block?.mode ?? null;
+  const sshConfigured = directInfo?.block !== null && directInfo?.block !== undefined;
+  const directReady = Boolean(
+    pageDetails &&
+      directInfo?.keyAvailable &&
+      directInfo.block &&
+      (directInfo.block.mode === "private" || directPort),
+  );
+
+  const hasShell =
+    pageDetails === null || (pageDetails.runtime !== "wasm" && pageDetails.runtime !== "isolate");
+
+  const directConnection = useMemo(() => {
+    if (!pageDetails) {
       return null;
     }
     try {
-      return formatSshCommand({
-        sandboxId: pageDetails.id,
-        host: sshHostFromApiUrl(config.apiUrl),
-        keyPath: getKeyPath(pageDetails.id),
+      const block = directInfo?.block ?? null;
+      return {
+        alias: getDirectSshAlias(pageDetails.id),
+        mode: block?.mode ?? null,
+        host: directPort?.host ?? block?.host ?? null,
+        port: directPort?.hostPort ?? block?.port ?? null,
+        keyPath: getDirectKeyPath(pageDetails.id),
+        keyAvailable: directInfo?.keyAvailable ?? false,
         knownHostsPath: getKnownHostsPath(),
-      });
+        includePresent: directInfo?.includePresent ?? false,
+        sshdRunning: directInfo?.sshdRunning ?? null,
+        portOpen: directPort !== undefined,
+        explicitCommand: block ? formatExplicitSshCommand(block) : null,
+      };
     } catch {
       return null;
     }
-  }, [pageDetails, config]);
+  }, [pageDetails, directInfo, directPort]);
+
+  const vscodeVisibleEntries = useMemo(
+    () =>
+      vscodeDir.entries.filter((entry) => vscodeDir.showHidden || !isHiddenRemoteName(entry.name)),
+    [vscodeDir.entries, vscodeDir.showHidden],
+  );
 
   const gatewayHost = useMemo(() => {
     if (!config) {
@@ -783,6 +1005,9 @@ export function App() {
       status: pageDetails?.status ?? null,
       keyAvailable: pageDetails !== null && keyAvailable,
       sshCommandAvailable: gatewayHost !== null,
+      hasShell,
+      directReady,
+      sshConfigured,
     };
     switch (page.kind) {
       case "sandboxes":
@@ -800,7 +1025,40 @@ export function App() {
       case "create-snapshot":
         return buildCreateSnapshotActions();
       case "ssh-details":
-        return buildSshDetailsActions({ canForgetHost: gatewayHost !== null });
+        return buildSshDetailsActions({
+          canManageHostKeys: gatewayHost !== null,
+          directReady,
+          hasKeys: authorizedKeys.length > 0,
+          running: pageDetails?.status === "started",
+          hasShell,
+          mode: directMode,
+        });
+      case "setup-ssh":
+        return buildSetupSshActions({
+          running: setupRunning,
+          completed: setupResult !== null,
+          failed: setupError !== null,
+          mode: setupMode,
+        });
+      case "enable-public-ssh":
+        return buildEnablePublicSshActions();
+      case "vscode-directory":
+        return [];
+      case "ssh-include":
+        return buildSshIncludeActions();
+      case "add-ssh-key":
+        return buildAddSshKeyActions();
+      case "remove-ssh-key":
+        return buildRemoveSshKeyActions({
+          hasKeys: authorizedKeys.length > 0,
+          isLewdev: authorizedKeys[sshKeySelected]?.isLewdev === true,
+        });
+      case "disable-ssh":
+        return buildDisableSshActions();
+      case "reset-ssh":
+        return buildResetSshActions();
+      case "trust-hosts":
+        return buildTrustHostActions();
       case "forget-host":
         return buildForgetHostActions();
       case "ports": {
@@ -821,7 +1079,24 @@ export function App() {
       case "ssh-terminal":
         return [];
     }
-  }, [page, pageDetails, keyAvailable, gatewayHost, config, portSelected]);
+  }, [
+    page,
+    pageDetails,
+    keyAvailable,
+    gatewayHost,
+    config,
+    portSelected,
+    hasShell,
+    directReady,
+    directMode,
+    sshConfigured,
+    authorizedKeys,
+    sshKeySelected,
+    setupRunning,
+    setupMode,
+    setupResult,
+    setupError,
+  ]);
 
   const selectedActionIndex = actionIndex(actions, selectedActionId);
   const sandboxGroups = useMemo(
@@ -888,6 +1163,81 @@ export function App() {
         }
         return;
       }
+      case "setup-ssh":
+        openSetupSsh();
+        return;
+      case "confirm-setup-private":
+        void performSetupSsh(false, "private");
+        return;
+      case "confirm-setup-public":
+        void performSetupSsh(false, "public");
+        return;
+      case "repair-ssh":
+        openSetupSsh();
+        return;
+      case "open-vscode":
+        void openInVSCode();
+        return;
+      case "add-ssh-key": {
+        const target = actionTarget();
+        if (target) {
+          setNewSshKey("");
+          setAddSshKeyError(null);
+          pushSandboxScoped({ kind: "add-ssh-key", ...target });
+        }
+        return;
+      }
+      case "remove-ssh-key": {
+        const target = actionTarget();
+        if (target) {
+          setSshKeySelected(0);
+          setRemoveSshKeyError(null);
+          pushSandboxScoped({ kind: "remove-ssh-key", ...target });
+        }
+        return;
+      }
+      case "confirm-remove-ssh-key":
+        void performRemoveSshKey();
+        return;
+      case "disable-ssh": {
+        const target = actionTarget();
+        if (target) {
+          pushSandboxScoped({ kind: "disable-ssh", ...target });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-disable-ssh":
+        void performDisableSsh();
+        return;
+      case "reset-ssh": {
+        const target = actionTarget();
+        if (target) {
+          pushSandboxScoped({ kind: "reset-ssh", ...target });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-reset-ssh":
+        void performResetSsh();
+        return;
+      case "enable-public-ssh": {
+        const target = actionTarget();
+        if (target) {
+          pushSandboxScoped({ kind: "enable-public-ssh", ...target });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-enable-public-ssh":
+        void performEnablePublicSsh();
+        return;
+      case "use-private-ssh":
+        void performUsePrivateSsh();
+        return;
+      case "confirm-include":
+        void performInclude();
+        return;
       case "ports": {
         const target = actionTarget();
         if (target) {
@@ -904,6 +1254,12 @@ export function App() {
         }
         return;
       }
+      case "trust-hosts":
+        void startTrustHosts();
+        return;
+      case "confirm-trust-hosts":
+        void performTrustHosts();
+        return;
       case "forget-host": {
         const target = actionTarget();
         if (target) {
@@ -1108,16 +1464,427 @@ export function App() {
     sshSession.current = session;
   }, []);
 
-  async function copySshCommand(): Promise<void> {
-    if (!sshCommand) {
-      showToast("error", "The SSH command is unavailable.");
+  function openSetupSsh(): void {
+    const target = actionTarget();
+    if (!target) {
       return;
     }
-    const copied = await writeClipboard(sshCommand);
-    showToast(
-      copied ? "success" : "error",
-      copied ? "Copied SSH command" : "Couldn't copy the SSH command. Use your terminal's copy.",
+    const mode = directInfo?.block?.mode ?? "private";
+    setSetupMode(mode);
+    setSetupSteps(emptySetupSteps());
+    setSetupRunning(false);
+    setSetupError(null);
+    setSetupResult(null);
+    pushSandboxScoped({ kind: "setup-ssh", ...target });
+    setSelectedActionId(mode === "public" ? "confirm-setup-public" : "confirm-setup-private");
+  }
+
+  async function performSetupSsh(reset = false, requestedMode?: DirectSshMode): Promise<void> {
+    const target =
+      page.kind === "setup-ssh" || page.kind === "reset-ssh" ? pageSandbox(page) : null;
+    if (!api || !target || setupRunning) {
+      return;
+    }
+    const mode = requestedMode ?? directInfo?.block?.mode ?? "private";
+    setSetupMode(mode);
+    setSetupSteps(emptySetupSteps());
+    setSetupError(null);
+    setSetupResult(null);
+    setSetupRunning(true);
+    try {
+      const onProgress = (progress: DirectSshProgress) => {
+        setSetupSteps((previous) => ({
+          ...previous,
+          [progress.step]: {
+            status: progress.status,
+            ...(progress.message === undefined ? {} : { message: progress.message }),
+          },
+        }));
+      };
+      const result = reset
+        ? await resetDirectSsh(api, target.id, { onProgress, mode })
+        : await setupDirectSsh(api, target.id, { onProgress, mode });
+      setSetupResult(result);
+      await loadDetails(target.id);
+      await refreshDirectSshState(target.id, true);
+      await refreshAuthorizedKeys(target.id);
+      if (!result.includePresent) {
+        pushSandboxScoped({ kind: "ssh-include", purpose: "setup", ...target });
+      } else {
+        showToast("success", "Direct SSH is ready.");
+      }
+    } catch (error) {
+      setSetupError(describeError(error));
+    } finally {
+      setSetupRunning(false);
+    }
+  }
+
+  async function performResetSsh(): Promise<void> {
+    const target = page.kind === "reset-ssh" ? pageSandbox(page) : null;
+    if (!api || !target) {
+      return;
+    }
+    setSetupSteps(emptySetupSteps());
+    setSetupError(null);
+    setSetupResult(null);
+    setSelectedActionId(null);
+    const mode = directInfo?.block?.mode ?? "private";
+    setSetupMode(mode);
+    setStack((previous) => [...popPage(previous), { kind: "setup-ssh", ...target }]);
+    await performSetupSsh(true, mode);
+  }
+
+  async function performEnablePublicSsh(): Promise<void> {
+    const target = page.kind === "enable-public-ssh" ? pageSandbox(page) : null;
+    if (!api || !target) {
+      return;
+    }
+    setBusyMessage("Enabling public TCP SSH…");
+    try {
+      await enablePublicDirectSsh(api, target.id);
+      await loadDetails(target.id);
+      await refreshDirectSshState(target.id, true);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("warning", "SSH now listens on a public TCP port. Login stays key-only.");
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performUsePrivateSsh(): Promise<void> {
+    const target = actionTarget();
+    if (!api || !target) {
+      return;
+    }
+    setBusyMessage("Switching SSH to the private connection…");
+    try {
+      await switchToPrivateSsh(api, target.id);
+      await loadDetails(target.id);
+      await refreshDirectSshState(target.id, true);
+      setSelectedActionId(null);
+      showToast("success", "SSH now uses the private AerolVM API connection.");
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performInclude(): Promise<void> {
+    if (page.kind !== "ssh-include") {
+      return;
+    }
+    const target = pageSandbox(page);
+    const purpose = page.purpose;
+    setBusyMessage("Adding lewdev's SSH config Include…");
+    try {
+      const added = await addSshInclude();
+      setDirectInfo((previous) =>
+        previous === null ? previous : { ...previous, includePresent: true },
+      );
+      setSetupResult((previous) =>
+        previous === null ? previous : { ...previous, includePresent: true },
+      );
+      setStack((previous) => popPage(previous));
+      showToast(
+        "success",
+        added ? "Added lewdev's Include to ~/.ssh/config." : "lewdev's Include is already present.",
+      );
+      if (purpose === "vscode" && target) {
+        await openVscodeDirectory(target);
+      }
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function openInVSCode(): Promise<void> {
+    const target = actionTarget();
+    if (!api || !target) {
+      return;
+    }
+    if (!directReady) {
+      showToast("error", "Set up SSH first, then open the sandbox in VS Code.");
+      return;
+    }
+    try {
+      if (!(await hasSshInclude())) {
+        setDirectInfo((previous) =>
+          previous === null ? previous : { ...previous, includePresent: false },
+        );
+        pushSandboxScoped({ kind: "ssh-include", purpose: "vscode", ...target });
+        return;
+      }
+      if (directMode === "public") {
+        await ensureSshdRunning(api, target.id);
+      }
+      await openVscodeDirectory(target);
+    } catch (error) {
+      showToast("error", describeError(error));
+    }
+  }
+
+  async function openVscodeDirectory(target: SandboxPageTarget): Promise<void> {
+    const start = lastVscodeDir.current[target.id] ?? "/root";
+    setVscodeDir({
+      ...EMPTY_VSCODE_DIR,
+      currentDir: start,
+      pathInput: start,
+      loading: true,
+    });
+    pushSandboxScoped({ kind: "vscode-directory", ...target });
+    const loaded = await loadVscodeDirectory(target.id, start);
+    if (!loaded) {
+      await loadVscodeDirectory(target.id, "/");
+    }
+  }
+
+  /** Lists the folders in a sandbox directory, following symlinks to folders. */
+  async function listRemoteFolders(
+    sandboxId: string,
+    path: string,
+  ): Promise<{ entries: SandboxFileEntry[]; truncated: boolean }> {
+    if (!api) {
+      return { entries: [], truncated: false };
+    }
+    const client = api;
+    const listing = await client.listFiles(sandboxId, path, { limit: 2000 });
+    const candidates = listing.entries.filter(
+      (entry) => entry.isDir || entry.symlinkTarget !== undefined,
     );
+    const folders = await Promise.all(
+      candidates.map(async (entry) => {
+        if (entry.isDir) {
+          return entry;
+        }
+        try {
+          const info = await client.getFileInfo(sandboxId, entry.path);
+          return info.isDir ? entry : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const entries = folders
+      .filter((entry): entry is SandboxFileEntry => entry !== null)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    return { entries, truncated: listing.truncated };
+  }
+
+  /** Tab: completes the typed path's last segment from the folders of its parent. */
+  async function completeVscodePath(sandboxId: string): Promise<void> {
+    const input = vscodeDir.pathInput;
+    const slash = input.lastIndexOf("/");
+    const partial = slash < 0 ? input : input.slice(slash + 1);
+    const parent = resolveRemotePath(
+      vscodeDir.currentDir,
+      slash < 0 ? "." : input.slice(0, slash + 1),
+    );
+    const showHidden = vscodeDir.showHidden || partial.startsWith(".");
+    let entries = vscodeDir.entries;
+    if (parent !== vscodeDir.currentDir) {
+      try {
+        entries = (await listRemoteFolders(sandboxId, parent)).entries;
+      } catch {
+        return;
+      }
+    }
+    const names = entries
+      .map((entry) => entry.name)
+      .filter((name) => showHidden || !isHiddenRemoteName(name));
+    setVscodeDir((previous) =>
+      previous.pathInput === input
+        ? { ...previous, pathInput: completeRemotePath(input, names) }
+        : previous,
+    );
+  }
+
+  async function loadVscodeDirectory(sandboxId: string, path: string): Promise<boolean> {
+    setVscodeDir((previous) => ({
+      ...previous,
+      currentDir: path,
+      pathInput: path,
+      loading: true,
+      error: null,
+      selected: 0,
+    }));
+    if (!api) {
+      return false;
+    }
+    try {
+      const { entries, truncated } = await listRemoteFolders(sandboxId, path);
+      setVscodeDir((previous) => ({
+        ...previous,
+        currentDir: path,
+        pathInput: path,
+        entries,
+        truncated,
+        loading: false,
+        error: null,
+        selected: 0,
+      }));
+      return true;
+    } catch (error) {
+      setVscodeDir((previous) => ({
+        ...previous,
+        entries: [],
+        truncated: false,
+        loading: false,
+        error: describeError(error),
+        selected: 0,
+      }));
+      return false;
+    }
+  }
+
+  async function launchVscodeDirectory(): Promise<void> {
+    const target = pageSandbox(page);
+    if (!api || !target) {
+      return;
+    }
+    try {
+      if (directMode === "public") {
+        await ensureSshdRunning(api, target.id);
+      }
+      lastVscodeDir.current[target.id] = vscodeDir.currentDir;
+      launchVSCode(target.id, vscodeDir.currentDir);
+    } catch (error) {
+      showToast("error", describeError(error));
+    }
+  }
+
+  function launchVSCode(sandboxId: string, directory: string): void {
+    const alias = getDirectSshAlias(sandboxId);
+    const url = `vscode://vscode-remote/ssh-remote+${alias}${remotePathForUrl(directory)}`;
+    const win = process.platform === "win32";
+    // On Windows `code` is a .cmd shim that needs a shell and breaks on paths with
+    // spaces, so the vscode:// URL (no cmd metacharacters) goes through `start`.
+    const code = win ? null : Bun.which("code");
+    const command = code ?? (win ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open");
+    const args = code
+      ? ["--remote", `ssh-remote+${alias}`, directory]
+      : win
+        ? ["/d", "/c", "start", "", url]
+        : [url];
+    try {
+      const child = spawn(command, args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.once("error", (error) => {
+        showToast("error", `Could not open VS Code: ${describeError(error)}`);
+      });
+      child.unref();
+      showToast("info", "Opening VS Code. The Remote - SSH extension is required.");
+    } catch (error) {
+      showToast("error", `Could not open VS Code: ${describeError(error)}`);
+    }
+  }
+
+  async function copySshCommand(): Promise<void> {
+    const target = actionTarget();
+    if (!target) {
+      return;
+    }
+    try {
+      const block = directInfo?.block ?? (await readDirectSshConfigBlock(target.id));
+      const include = await hasSshInclude();
+      let command: string | null = null;
+      if (include) {
+        command = formatDirectSshCommand(target.id);
+      } else if (directReady && block) {
+        command = formatExplicitSshCommand(block);
+      }
+      if (!command) {
+        showToast("error", "Set up SSH first, then copy the command.");
+        return;
+      }
+      const copied = await writeClipboard(command);
+      showToast(
+        copied ? "success" : "error",
+        copied ? `Copied: ${command}` : "Couldn't copy the SSH command. Use your terminal's copy.",
+      );
+    } catch (error) {
+      showToast("error", describeError(error));
+    }
+  }
+
+  async function submitAddSshKey(): Promise<void> {
+    if (!api || page.kind !== "add-ssh-key" || busyMessage) {
+      return;
+    }
+    setAddSshKeyError(null);
+    if (!newSshKey.trim()) {
+      setAddSshKeyError("Paste an OpenSSH public key first.");
+      return;
+    }
+    setBusyMessage("Adding SSH key…");
+    try {
+      await addAuthorizedKey(api, page.id, newSshKey);
+      setNewSshKey("");
+      await refreshAuthorizedKeys(page.id);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", "Added the SSH key to root's authorized_keys.");
+    } catch (error) {
+      setAddSshKeyError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performRemoveSshKey(): Promise<void> {
+    const target = page.kind === "remove-ssh-key" ? pageSandbox(page) : null;
+    const key = authorizedKeys[sshKeySelected];
+    if (!api || !target || !key) {
+      return;
+    }
+    setRemoveSshKeyError(null);
+    setBusyMessage("Removing SSH key…");
+    try {
+      await removeAuthorizedKey(api, target.id, key.line);
+      await refreshAuthorizedKeys(target.id);
+      await refreshDirectSshState(target.id, true);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast(
+        "success",
+        key.isLewdev
+          ? "Removed lewdev's key. Run Set up SSH to restore it."
+          : "Removed the SSH key.",
+      );
+    } catch (error) {
+      setRemoveSshKeyError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performDisableSsh(): Promise<void> {
+    const target = page.kind === "disable-ssh" ? pageSandbox(page) : null;
+    if (!api || !target) {
+      return;
+    }
+    setBusyMessage("Disabling SSH…");
+    try {
+      await disableDirectSsh(api, target.id);
+      await loadDetails(target.id);
+      await refreshDirectSshState(target.id, false);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", "Direct SSH is disabled.");
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
   }
 
   function openConnect(): void {
@@ -1222,6 +1989,9 @@ export function App() {
         return;
       case "open-port":
         void submitPort();
+        return;
+      case "add-ssh-key":
+        void submitAddSshKey();
         return;
       default:
         return;
@@ -1507,12 +2277,18 @@ export function App() {
     setBusyMessage(`Deleting ${target.label}…`);
     try {
       await api.destroySandbox(target.id);
-      let warning: string | null = null;
+      const warnings: string[] = [];
       try {
         await deletePrivateKey(target.id);
       } catch (error) {
-        warning = `its stored SSH key could not be deleted: ${describeError(error)}`;
+        warnings.push(`its gateway key could not be deleted: ${describeError(error)}`);
       }
+      try {
+        await cleanupDirectSsh(target.id);
+      } catch (error) {
+        warnings.push(`its direct SSH data could not be deleted: ${describeError(error)}`);
+      }
+      const warning = warnings.length > 0 ? warnings.join("; ") : null;
       setDetails(null);
       setSelectedActionId(null);
       setStack([ROOT_PAGE]);
@@ -1521,6 +2297,49 @@ export function App() {
         warning ? "warning" : "success",
         warning ? `Deleted ${target.label}, but ${warning}.` : `Deleted ${target.label}.`,
       );
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function startTrustHosts(): Promise<void> {
+    const target = actionTarget();
+    const host = gatewayHost;
+    if (!target || !host) {
+      return;
+    }
+
+    setBusyMessage("Scanning gateway host keys…");
+    try {
+      const scan = await scanGatewayHostKeys(host);
+      setHostKeyScan(scan);
+      push({ kind: "trust-hosts", ...target });
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performTrustHosts(): Promise<void> {
+    const target = page.kind === "trust-hosts" ? pageSandbox(page) : null;
+    const host = gatewayHost;
+    const scan = hostKeyScan;
+    if (!target || !host || !scan) {
+      return;
+    }
+
+    const count = scan.keys.length;
+    const label = count === 1 ? "the gateway host key" : `${count} gateway host keys`;
+    setBusyMessage(`Saving ${label}…`);
+    try {
+      await saveGatewayHostKeys(host, scan.keys);
+      setHostKeyScan(null);
+      setSelectedActionId(null);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Saved ${label} for ${scan.entry}.`);
     } catch (error) {
       showToast("error", describeError(error));
     } finally {
@@ -1656,8 +2475,20 @@ export function App() {
       return;
     }
 
-    const text = raw.replace(/[\r\n\t]+/g, " ");
+    const text = raw.replace(/[\r\n\t]+/g, " ").trim();
     if (!text) {
+      return;
+    }
+
+    if (page.kind === "add-ssh-key") {
+      setNewSshKey((previous) => appendText(previous, text));
+      return;
+    }
+    if (page.kind === "vscode-directory") {
+      setVscodeDir((previous) => ({
+        ...previous,
+        pathInput: appendText(previous.pathInput, text),
+      }));
       return;
     }
 
@@ -1806,7 +2637,87 @@ export function App() {
       quit();
       return;
     }
-    if (booting || busyMessage || connectBusy) {
+    if (booting || busyMessage || connectBusy || setupRunning) {
+      return;
+    }
+
+    if (page.kind === "vscode-directory") {
+      if (vscodeDir.loading) {
+        if (key.name === "escape") {
+          pop();
+        }
+        return;
+      }
+      const parent = vscodeDir.currentDir !== "/";
+      const folderStart = parent ? 2 : 1;
+      const rowCount = folderStart + vscodeVisibleEntries.length;
+      if (key.ctrl && key.name === "t") {
+        key.preventDefault();
+        setVscodeDir((previous) => ({
+          ...previous,
+          showHidden: !previous.showHidden,
+          selected: 0,
+        }));
+        return;
+      }
+      if (key.name === "down") {
+        setVscodeDir((previous) => ({
+          ...previous,
+          selected: Math.min(previous.selected + 1, Math.max(0, rowCount - 1)),
+        }));
+        return;
+      }
+      if (key.name === "up") {
+        setVscodeDir((previous) => ({
+          ...previous,
+          selected: Math.max(0, previous.selected - 1),
+        }));
+        return;
+      }
+      if (key.name === "tab") {
+        key.preventDefault();
+        void completeVscodePath(page.id);
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        key.preventDefault();
+        const typed = resolveRemotePath(vscodeDir.currentDir, vscodeDir.pathInput);
+        if (typed !== vscodeDir.currentDir) {
+          void loadVscodeDirectory(page.id, typed);
+          return;
+        }
+        if (vscodeDir.selected === 0) {
+          void launchVscodeDirectory();
+          return;
+        }
+        if (parent && vscodeDir.selected === 1) {
+          void loadVscodeDirectory(page.id, parentRemotePath(vscodeDir.currentDir));
+          return;
+        }
+        const folder = vscodeVisibleEntries[vscodeDir.selected - folderStart];
+        if (folder) {
+          void loadVscodeDirectory(page.id, joinRemotePath(vscodeDir.currentDir, folder.name));
+        }
+        return;
+      }
+      if (key.name === "escape") {
+        pop();
+        return;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        setVscodeDir((previous) => ({
+          ...previous,
+          pathInput: removeLastChar(previous.pathInput),
+        }));
+        return;
+      }
+      const char = printableChar(key);
+      if (char) {
+        setVscodeDir((previous) => ({
+          ...previous,
+          pathInput: appendText(previous.pathInput, char),
+        }));
+      }
       return;
     }
 
@@ -1859,12 +2770,42 @@ export function App() {
       }
     }
 
+    if (page.kind === "add-ssh-key" && !key.ctrl && !key.meta) {
+      if (key.name === "backspace" || key.name === "delete") {
+        setNewSshKey((previous) => removeLastChar(previous));
+        return;
+      }
+      const char = printableChar(key);
+      if (char) {
+        setNewSshKey((previous) => appendText(previous, char));
+        return;
+      }
+    }
+
+    if (page.kind === "remove-ssh-key" && (key.name === "left" || key.name === "right")) {
+      setSshKeySelected((previous) => {
+        if (authorizedKeys.length === 0) {
+          return 0;
+        }
+        const next = previous + (key.name === "left" ? -1 : 1);
+        return (next + authorizedKeys.length) % authorizedKeys.length;
+      });
+      return;
+    }
+
     if (
       page.kind === "sandbox" ||
       page.kind === "snapshot" ||
       page.kind === "ssh-details" ||
+      page.kind === "setup-ssh" ||
+      page.kind === "ssh-include" ||
+      page.kind === "add-ssh-key" ||
+      page.kind === "remove-ssh-key" ||
+      page.kind === "disable-ssh" ||
+      page.kind === "reset-ssh" ||
       page.kind === "delete-sandbox" ||
       page.kind === "delete-snapshot" ||
+      page.kind === "trust-hosts" ||
       page.kind === "forget-host"
     ) {
       if (key.name === "down" || actionKey(key) === "j") {
@@ -2422,7 +3363,7 @@ export function App() {
       return;
     }
     event.preventDefault();
-    if (busyMessage || connectBusy) {
+    if (busyMessage || connectBusy || setupRunning) {
       return;
     }
     insertPastedText(decodePasteBytes(event.bytes));
@@ -2451,6 +3392,34 @@ export function App() {
     }
     if (page.kind === "ports") {
       return actionHints(actions, { extra: [["↑/↓", "move"]] });
+    }
+    if (page.kind === "vscode-directory") {
+      return [
+        ["↑/↓", "move"],
+        ["enter", "open / enter"],
+        ["tab", "complete"],
+        ["ctrl+t", "hidden"],
+        ["esc", "back"],
+      ];
+    }
+    if (page.kind === "remove-ssh-key") {
+      return actionHints(actions, {
+        extra: [
+          ["←/→", "key"],
+          ["↑/↓", "action"],
+        ],
+      });
+    }
+    if (
+      page.kind === "setup-ssh" ||
+      page.kind === "ssh-include" ||
+      page.kind === "add-ssh-key" ||
+      page.kind === "disable-ssh" ||
+      page.kind === "reset-ssh"
+    ) {
+      return actionHints(actions, {
+        selection: page.kind !== "add-ssh-key",
+      });
     }
     if (page.kind === "connect") {
       if (connectField === "submit") {
@@ -2598,7 +3567,8 @@ export function App() {
         page.kind === "snapshot" ||
         page.kind === "ssh-details" ||
         page.kind === "delete-sandbox" ||
-        page.kind === "delete-snapshot",
+        page.kind === "delete-snapshot" ||
+        page.kind === "trust-hosts",
     });
   }, [
     booting,
@@ -2671,22 +3641,110 @@ export function App() {
       );
       break;
     case "ssh-details":
-      content = pageDetails ? (
-        <SshDetailsScreen
-          details={pageDetails}
-          gatewayHost={gatewayHost}
-          keyPath={detailsKeyPath}
-          keyAvailable={keyAvailable}
-          knownHostsPath={knownHostsPath ?? "unavailable"}
+      content =
+        pageDetails && directConnection ? (
+          <SshDetailsScreen
+            details={pageDetails}
+            connection={directConnection}
+            keys={authorizedKeys}
+            keysLoading={authorizedKeysLoading}
+            keysError={authorizedKeysError}
+            gatewayHost={gatewayHost}
+            gatewayKeyPath={detailsKeyPath}
+            gatewayKeyAvailable={keyAvailable}
+            gatewayKnownHostsPath={knownHostsPath ?? "unavailable"}
+            actions={actions}
+            selectedIndex={selectedActionIndex}
+          />
+        ) : (
+          <LoadingPanel
+            loading={detailsLoading}
+            error={detailsError}
+            title="SSH details"
+            fallback="SSH details are unavailable."
+          />
+        );
+      break;
+    case "setup-ssh":
+      content = (
+        <SetupSshScreen
+          steps={setupSteps}
+          mode={setupResult?.mode ?? setupMode}
+          running={setupRunning}
+          error={setupError}
+          result={setupResult}
           actions={actions}
           selectedIndex={selectedActionIndex}
         />
-      ) : (
-        <LoadingPanel
-          loading={detailsLoading}
-          error={detailsError}
-          title="SSH details"
-          fallback="SSH details are unavailable."
+      );
+      break;
+    case "ssh-include":
+      content = (
+        <SshIncludeScreen
+          configPath={getSshConfigPath()}
+          includeLine={getSshIncludeLine()}
+          homeConfigPath={join(homedir(), ".ssh", "config")}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "add-ssh-key":
+      content = (
+        <AddSshKeyScreen
+          value={newSshKey}
+          error={addSshKeyError}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "remove-ssh-key":
+      content = (
+        <RemoveSshKeyScreen
+          keys={authorizedKeys}
+          selected={sshKeySelected}
+          loading={authorizedKeysLoading}
+          error={removeSshKeyError ?? authorizedKeysError}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "disable-ssh":
+      content = (
+        <DisableSshScreen
+          label={page.label}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "reset-ssh":
+      content = (
+        <ResetSshScreen label={page.label} actions={actions} selectedIndex={selectedActionIndex} />
+      );
+      break;
+    case "enable-public-ssh":
+      content = (
+        <EnablePublicSshScreen
+          label={page.label}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "vscode-directory":
+      content = (
+        <VscodeDirectoryScreen
+          currentDir={vscodeDir.currentDir}
+          pathInput={vscodeDir.pathInput}
+          entries={vscodeVisibleEntries}
+          truncated={vscodeDir.truncated}
+          loading={vscodeDir.loading}
+          error={vscodeDir.error}
+          selected={vscodeDir.selected}
+          showHidden={vscodeDir.showHidden}
         />
       );
       break;
@@ -2717,6 +3775,24 @@ export function App() {
           label={page.label}
           actions={actions}
           selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "trust-hosts":
+      content = hostKeyScan ? (
+        <TrustHostsScreen
+          entry={hostKeyScan.entry}
+          keys={hostKeyScan.keys}
+          failedAddresses={hostKeyScan.failedAddresses}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      ) : (
+        <LoadingPanel
+          loading={false}
+          error="The gateway host keys were not scanned. Start again from SSH settings."
+          title="Trust host keys"
+          fallback="The gateway host keys are unavailable."
         />
       );
       break;

@@ -32,7 +32,16 @@ interface Call {
 const createdAt = "2026-11-25T10:00:00Z";
 
 function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
-  const base: Omit<SdkSandbox, "exposePort" | "unexposePort"> = {
+  const base: Omit<
+    SdkSandbox,
+    | "exposePort"
+    | "unexposePort"
+    | "exec"
+    | "execStream"
+    | "uploadFile"
+    | "listFiles"
+    | "getFileInfo"
+  > = {
     id: "sb-0123456789abcdef",
     image: "ubuntu:24.04",
     status: "started",
@@ -54,6 +63,35 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
       visibility: options?.visibility === "token" ? "token" : undefined,
     }),
     unexposePort: async () => {},
+    exec: async () => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      durationMS: 0,
+      timedOut: false,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
+    uploadFile: async () => {},
+    execStream: () => ({
+      write: () => {},
+      resize: () => {},
+      signal: () => {},
+      close: () => {},
+      done: Promise.resolve({ code: 0 }),
+    }),
+    listFiles: async () => ({ entries: [], truncated: false }),
+    getFileInfo: async () => ({
+      name: "root",
+      path: "/root",
+      isDir: true,
+      size: 0,
+      mode: "drwxr-xr-x",
+      permissions: "0755",
+      owner: "root",
+      group: "root",
+      modTime: createdAt,
+    }),
     ...overrides,
   };
 }
@@ -213,7 +251,7 @@ describe("LewdevApi", () => {
     expectSandbox(items[0] as SandboxInfo);
     expect(items[0]?.name).toBe("dev");
     expect(items[0]?.exposedPorts).toEqual([
-      { port: 3000, url: "https://sb.example.com/3000", visibility: "token" },
+      { port: 3000, url: "https://sb.example.com/3000", visibility: "token", protocol: "http" },
     ]);
   });
 
@@ -320,6 +358,171 @@ describe("LewdevApi", () => {
 
     await api.closePort("sb-0123456789abcdef", 8080);
     expect(calls[1]).toEqual({ method: "unexposePort", args: [8080] });
+  });
+
+  test("opens a TCP port with the host address and parses listed tcp URLs", async () => {
+    const calls: Call[] = [];
+    const target = sandbox({
+      exposePort: async (port, options) => {
+        calls.push({ method: "exposePort", args: [port, options] });
+        return {
+          protocol: "tcp",
+          url: "tcp://eu.example.test:22042",
+          host: "eu.example.test",
+          hostPort: 22042,
+        };
+      },
+    });
+    const { sdk } = fakeSdk({
+      get: () => target,
+      list: () => [
+        sandbox({
+          exposedPorts: [
+            { port: 22, publicURL: "tcp://eu.example.test:22042" },
+            { port: 3000, publicURL: "https://sb.example.com/3000" },
+          ],
+        }),
+      ],
+    });
+    const api = new LewdevApi(sdk);
+
+    const opened = await api.openTcpPort("sb-0123456789abcdef", 22);
+    expect(calls[0]).toEqual({ method: "exposePort", args: [22, { protocol: "tcp" }] });
+    expect(opened).toEqual({
+      port: 22,
+      url: "tcp://eu.example.test:22042",
+      protocol: "tcp",
+      host: "eu.example.test",
+      hostPort: 22042,
+    });
+
+    const listed = await api.listSandboxes();
+    expect(listed[0]?.exposedPorts).toEqual([
+      {
+        port: 22,
+        url: "tcp://eu.example.test:22042",
+        protocol: "tcp",
+        host: "eu.example.test",
+        hostPort: 22042,
+      },
+      { port: 3000, url: "https://sb.example.com/3000", protocol: "http" },
+    ]);
+  });
+
+  test("runs commands and uploads files through the sandbox resource", async () => {
+    const calls: Call[] = [];
+    const target = sandbox({
+      exec: async (command) => {
+        calls.push({ method: "exec", args: [command] });
+        return {
+          stdout: "ok",
+          stderr: "",
+          exitCode: 0,
+          durationMS: 5,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        };
+      },
+      uploadFile: async (path, data, options) => {
+        calls.push({ method: "uploadFile", args: [path, data, options] });
+      },
+    });
+    const { sdk } = fakeSdk({ get: () => target });
+    const api = new LewdevApi(sdk);
+
+    await expect(api.exec("sb-abc", "true", { timeoutSeconds: 30 })).resolves.toEqual({
+      stdout: "ok",
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+    });
+    await api.uploadFile("sb-abc", "/tmp/file", "contents", { mode: 0o600 });
+    expect(calls).toEqual([
+      { method: "exec", args: [{ command: "true", timeoutSeconds: 30 }] },
+      { method: "uploadFile", args: ["/tmp/file", "contents", { mode: 0o600 }] },
+    ]);
+  });
+
+  test("maps streams and folder listings from the sandbox resource", async () => {
+    const writes: unknown[] = [];
+    const target = sandbox({
+      execStream: (options) => {
+        options.onStdout?.(new Uint8Array([1, 2]));
+        options.onStderr?.(new Uint8Array([3]));
+        return {
+          write: (data) => writes.push(data),
+          resize: () => {},
+          signal: () => {},
+          close: () => {},
+          done: Promise.resolve({ code: 0 }),
+        };
+      },
+      listFiles: async (path, options) => ({
+        entries: [
+          {
+            name: "root",
+            path: `${path}/root`,
+            isDir: true,
+            size: 0,
+            mode: "drwxr-xr-x",
+            permissions: "0755",
+            owner: "root",
+            group: "root",
+            modTime: createdAt,
+          },
+          {
+            name: "link",
+            path: `${path}/link`,
+            isDir: false,
+            size: 0,
+            mode: "lrwxrwxrwx",
+            permissions: "0777",
+            owner: "root",
+            group: "root",
+            modTime: createdAt,
+            symlinkTarget: "/root",
+          },
+        ],
+        truncated: Boolean(options?.limit),
+      }),
+      getFileInfo: async (path) => ({
+        name: "root",
+        path,
+        isDir: true,
+        size: 0,
+        mode: "drwxr-xr-x",
+        permissions: "0755",
+        owner: "root",
+        group: "root",
+        modTime: createdAt,
+      }),
+    });
+    const { sdk } = fakeSdk({ get: () => target });
+    const api = new LewdevApi(sdk);
+
+    const stdout: number[] = [];
+    const handle = await api.execStream("sb-abc", {
+      command: "exec /usr/sbin/sshd -i",
+      onStdout: (chunk) => stdout.push(...chunk),
+    });
+    handle.write("input");
+    expect(writes).toEqual(["input"]);
+    expect(stdout).toEqual([1, 2]);
+    await expect(handle.done).resolves.toEqual({ code: 0 });
+
+    const listing = await api.listFiles("sb-abc", "/root", { limit: 2000 });
+    expect(listing.truncated).toBe(true);
+    expect(listing.entries[1]).toEqual({
+      name: "link",
+      path: "/root/link",
+      isDir: false,
+      symlinkTarget: "/root",
+    });
+    await expect(api.getFileInfo("sb-abc", "/root")).resolves.toMatchObject({
+      name: "root",
+      isDir: true,
+    });
   });
 
   test("rejects invalid ports before calling the server", async () => {

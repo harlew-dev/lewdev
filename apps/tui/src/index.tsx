@@ -2,9 +2,13 @@
 import {
   checkForUpdate,
   cleanupPreviousBinary,
+  describeError,
   downloadVerifiedUpdate,
   installUpdate,
   isStandaloneBuild,
+  LewdevApi,
+  loadConfig,
+  runSshProxy,
   UpdateError,
   writeUpdateState,
 } from "@lewdev/core";
@@ -19,6 +23,7 @@ const HELP = `lewdev ${VERSION} — a terminal client for AerolVM sandboxes
 
 Usage: lewdev [--help] [--version]
        lewdev update [--check]
+       lewdev ssh-proxy <sandbox-id>
 
 Configuration:
   $XDG_CONFIG_HOME/lewdev/config.json (or ~/.config/lewdev/config.json)
@@ -28,6 +33,9 @@ Environment overrides:
   SB_API_URL             AerolVM server URL
   SB_API_TOKEN           AerolVM API token
   LEWDEV_NO_UPDATE_CHECK=1 disables the startup update check
+
+Direct SSH:
+  lewdev ssh-proxy <id>  Internal ProxyCommand endpoint (stdout is the SSH stream)
 
 Updates:
   lewdev update          Replace this binary with the latest release
@@ -116,6 +124,34 @@ async function main(): Promise<void> {
   }
   if (args[0] === "update") {
     process.exitCode = await runUpdate(args.slice(1));
+    return;
+  }
+  if (args[0] === "ssh-proxy") {
+    const sandboxId = args[1];
+    if (args.length !== 2 || !sandboxId) {
+      console.error("Usage: lewdev ssh-proxy <sandbox-id>");
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      const loaded = await loadConfig();
+      if (!loaded.config) {
+        console.error("lewdev is not configured. Run lewdev and connect to a server first.");
+        process.exitCode = 1;
+        return;
+      }
+      const code = await runSshProxy(LewdevApi.fromConfig(loaded.config), sandboxId, {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+      });
+      process.exitCode = code;
+      process.stdin.pause();
+      process.stdin.destroy();
+    } catch (error) {
+      console.error(describeError(error));
+      process.exitCode = 1;
+    }
     return;
   }
   if (args.length > 0) {

@@ -24,7 +24,7 @@ The install script installs lewdev to `~/.local/bin` on Linux and macOS, and `%L
 
 Run `lewdev` and enter your [AerolVM](https://microvm.aerol.ai/) API URL and token.
 
-- **Sandboxes** - create, start, stop and delete sandboxes, open ports, and SSH in
+- **Sandboxes** - create, start, stop and delete sandboxes, open ports, use the embedded gateway terminal, and set up private or public direct SSH for VS Code or plain `ssh`
 - **Snapshots** - save a sandbox, register one from an image or Dockerfile, and boot new sandboxes from it
 
 Switch tabs with `Tab` or `1`/`2`, move with the arrow keys, select with `Enter` and go back with `Esc`.

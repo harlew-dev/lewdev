@@ -47,6 +47,7 @@ describe("page stack", () => {
     expect(pageSandbox({ kind: "sandbox", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "create-snapshot", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "ssh-terminal", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "trust-hosts", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
   });
 
@@ -95,6 +96,15 @@ describe("breadcrumbs", () => {
         ),
       ),
     ).toEqual(["Sandboxes", "my-box", "Settings", "Forget host key"]);
+    expect(
+      breadcrumbTrail(
+        stackOf(
+          { kind: "sandbox", ...myBox },
+          { kind: "ssh-details", ...myBox },
+          { kind: "trust-hosts", ...myBox },
+        ),
+      ),
+    ).toEqual(["Sandboxes", "my-box", "Settings", "Trust host keys"]);
   });
 
   test("names the snapshot tab and pages", () => {

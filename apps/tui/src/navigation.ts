@@ -14,9 +14,18 @@ export type Page =
   | ({ kind: "create-snapshot" } & SandboxPageTarget)
   | ({ kind: "sandbox" } & SandboxPageTarget)
   | ({ kind: "ssh-details" } & SandboxPageTarget)
+  | ({ kind: "setup-ssh" } & SandboxPageTarget)
+  | ({ kind: "ssh-include"; purpose: "setup" | "vscode" } & SandboxPageTarget)
+  | ({ kind: "add-ssh-key" } & SandboxPageTarget)
+  | ({ kind: "remove-ssh-key" } & SandboxPageTarget)
+  | ({ kind: "disable-ssh" } & SandboxPageTarget)
+  | ({ kind: "reset-ssh" } & SandboxPageTarget)
+  | ({ kind: "enable-public-ssh" } & SandboxPageTarget)
+  | ({ kind: "vscode-directory" } & SandboxPageTarget)
   | ({ kind: "ports" } & SandboxPageTarget)
   | ({ kind: "open-port" } & SandboxPageTarget)
   | ({ kind: "delete-sandbox" } & SandboxPageTarget)
+  | ({ kind: "trust-hosts" } & SandboxPageTarget)
   | ({ kind: "forget-host" } & SandboxPageTarget)
   | ({ kind: "ssh-terminal" } & SandboxPageTarget);
 
@@ -34,9 +43,18 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   "create-snapshot": "Create snapshot",
   sandbox: null,
   "ssh-details": "Settings",
+  "setup-ssh": "Set up SSH",
+  "ssh-include": "Allow SSH config",
+  "add-ssh-key": "Add SSH key",
+  "remove-ssh-key": "Remove SSH key",
+  "disable-ssh": "Disable SSH",
+  "reset-ssh": "Reset SSH",
+  "enable-public-ssh": "Public TCP SSH",
+  "vscode-directory": "Select directory",
   ports: "Ports",
   "open-port": "Open port",
   "delete-sandbox": "Delete sandbox",
+  "trust-hosts": "Trust host keys",
   "forget-host": "Forget host key",
   "ssh-terminal": "SSH terminal",
 };
