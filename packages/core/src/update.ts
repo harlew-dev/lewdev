@@ -353,9 +353,11 @@ export async function installUpdate(
   const target = await realpath(targetPath);
   const tmpPath = join(dirname(target), `.${basename(target)}.update-${process.pid}-${Date.now()}`);
   try {
-    await writeFile(tmpPath, binary, { mode: 0o755, flag: "wx" });
-    const handle = await open(tmpPath, "r");
+    // Write and flush through one writable handle: Windows refuses to fsync a
+    // file opened read-only.
+    const handle = await open(tmpPath, "wx", 0o755);
     try {
+      await handle.writeFile(binary);
       await handle.sync();
     } finally {
       await handle.close();
