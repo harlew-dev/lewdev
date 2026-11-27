@@ -1,4 +1,8 @@
 export type {
+  ApiTokenInfo,
+  ApiTokenRole,
+  CreateApiTokenInput,
+  CreatedApiToken,
   AccountInfo,
   AddCustomDomainInput,
   AerolSdk,
@@ -51,8 +55,10 @@ export type {
   TerminalSessionStatus,
 } from "./client.js";
 export {
+  API_TOKEN_ROLES,
   LewdevApi,
   RESERVED_SNAPSHOT_PREFIX,
+  validateCreateApiToken,
   validateSnapshotName,
 } from "./client.js";
 export type {

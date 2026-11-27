@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  APIToken,
   AuditPage,
+  CreateAPITokenOptions,
   CallOptions,
   CreateOptions,
   CreateSessionOptions,
@@ -29,6 +31,7 @@ import { Image } from "@aerol-ai/aerolvm-sdk";
 import {
   type AerolSdk,
   LewdevApi,
+  validateCreateApiToken,
   type SandboxInfo,
   type SdkSandbox,
   type SnapshotInfo,
@@ -212,6 +215,7 @@ function fakeSdk(
     deleteSnapshot?: (name: string) => void;
     whoami?: WhoAmI;
     getTeamQuota?: (team: string) => TeamQuota;
+    apiTokens?: APIToken[];
     createSession?: (id: string, sessionOptions: CreateSessionOptions) => Session;
     listSessions?: (id: string) => Session[];
     getSession?: (id: string, sessionID: string) => Session;
@@ -418,6 +422,29 @@ function fakeSdk(
           updatedAt: createdAt,
         }
       );
+    },
+    tokens: {
+      create: async (tokenOptions: CreateAPITokenOptions) => {
+        calls.push({ method: "tokens.create", args: [tokenOptions] });
+        return {
+          id: "tok_new",
+          name: tokenOptions.name,
+          role: tokenOptions.role,
+          team: tokenOptions.team,
+          createdBy: "operator",
+          createdAt,
+          expiresAt: "2027-02-25T00:00:00Z",
+          expired: false,
+          token: "avm_secret_value",
+        };
+      },
+      list: async () => {
+        calls.push({ method: "tokens.list", args: [] });
+        return { tokens: options.apiTokens ?? [] };
+      },
+      revoke: async (id: string) => {
+        calls.push({ method: "tokens.revoke", args: [id] });
+      },
     },
   };
 
@@ -1291,6 +1318,8 @@ describe("LewdevApi account limits", () => {
       role: "runner",
       team: "acme",
       expiresAt: "2026-12-01T00:00:00Z",
+      principalKind: "token",
+      principalId: "tok_test",
     });
     expect(calls[0]).toEqual({ method: "whoami", args: [] });
   });
@@ -1627,5 +1656,66 @@ describe("LewdevApi audit log", () => {
         ],
       },
     ]);
+  });
+});
+
+describe("API tokens", () => {
+  const token = (id: string, created: string): APIToken => ({
+    id,
+    name: id,
+    role: "runner",
+    team: "acme",
+    createdBy: "operator",
+    createdAt: created,
+    expiresAt: "2027-01-01T00:00:00Z",
+    expired: false,
+  });
+
+  test("lists tokens newest first without secrets", async () => {
+    const { sdk } = fakeSdk({
+      apiTokens: [
+        token("tok_old", "2026-01-01T00:00:00Z"),
+        token("tok_new", "2026-06-01T00:00:00Z"),
+      ],
+    });
+    const listed = await new LewdevApi(sdk).listApiTokens();
+    expect(listed.map((entry) => entry.id)).toEqual(["tok_new", "tok_old"]);
+    expect(JSON.stringify(listed)).not.toContain("avm_");
+  });
+
+  test("returns the secret separately from the token record", async () => {
+    const { sdk, calls } = fakeSdk();
+    const created = await new LewdevApi(sdk).createApiToken({
+      name: " ci-deploy ",
+      role: "runner",
+      team: "acme",
+      expiresIn: "90d",
+    });
+    expect(created.secret).toBe("avm_secret_value");
+    expect(JSON.stringify(created.token)).not.toContain("avm_secret_value");
+    expect(calls[0]).toEqual({
+      method: "tokens.create",
+      args: [{ name: "ci-deploy", role: "runner", team: "acme", expiresIn: "90d" }],
+    });
+  });
+
+  test("validates create requests before calling the server", () => {
+    const valid = { name: "ci", role: "runner" as const, team: "acme", expiresIn: "720h" };
+    expect(() => validateCreateApiToken(valid)).not.toThrow();
+    expect(() => validateCreateApiToken({ ...valid, name: "has space" })).toThrow();
+    expect(() => validateCreateApiToken({ ...valid, name: "x".repeat(65) })).toThrow();
+    expect(() => validateCreateApiToken({ ...valid, team: " " })).toThrow();
+    expect(() => validateCreateApiToken({ ...valid, role: "admin" })).toThrow(/team "\*"/);
+    expect(() => validateCreateApiToken({ ...valid, role: "admin", team: "*" })).not.toThrow();
+    expect(() => validateCreateApiToken({ ...valid, expiresIn: "forever" })).toThrow();
+    expect(() => validateCreateApiToken({ ...valid, expiresIn: "1h30m" })).not.toThrow();
+  });
+
+  test("revokes by id and rejects ids that are not token ids", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.revokeApiToken(" tok_abc ");
+    expect(calls[0]).toEqual({ method: "tokens.revoke", args: ["tok_abc"] });
+    await expect(api.revokeApiToken("../sandboxes")).rejects.toThrow();
   });
 });

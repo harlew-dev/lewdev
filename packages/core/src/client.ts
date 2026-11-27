@@ -46,6 +46,9 @@ import {
   type TeamQuota,
   type UploadFileOptions,
   type WhoAmI,
+  type APITokenList,
+  type CreateAPITokenOptions,
+  type CreatedAPIToken,
 } from "@aerol-ai/aerolvm-sdk";
 
 import type { LewdevConfig } from "./config.js";
@@ -300,6 +303,11 @@ export interface AerolSdk {
   deleteSnapshot(name: string, call?: CallOptions): Promise<void>;
   whoami(call?: CallOptions): Promise<WhoAmI>;
   getTeamQuota(team: string, call?: CallOptions): Promise<TeamQuota>;
+  tokens: {
+    create(options: CreateAPITokenOptions, call?: CallOptions): Promise<CreatedAPIToken>;
+    list(call?: CallOptions): Promise<APITokenList>;
+    revoke(id: string, call?: CallOptions): Promise<void>;
+  };
 }
 
 export type PortVisibility = Extract<ExposeVisibility, "public" | "token">;
@@ -604,6 +612,42 @@ export interface AccountInfo {
   role: string;
   team?: string;
   expiresAt?: string;
+  /** `"token"`, `"operator"`, `"oidc"`, ... */
+  principalKind?: string;
+  /** For an API token, its public `tok_…` id, so the UI can spot revoking itself. */
+  principalId?: string;
+  principalName?: string;
+}
+
+export type ApiTokenRole = "viewer" | "runner" | "auditor" | "admin";
+
+export const API_TOKEN_ROLES: readonly ApiTokenRole[] = ["viewer", "runner", "auditor", "admin"];
+
+/** A scoped API token as listed. Never carries the secret. */
+export interface ApiTokenInfo {
+  id: string;
+  name: string;
+  role: string;
+  /** A team name, or `"*"` for every team. */
+  team: string;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  expired: boolean;
+}
+
+export interface CreateApiTokenInput {
+  name: string;
+  role: ApiTokenRole;
+  team: string;
+  /** A Go duration such as `"90d"` or `"720h"`. */
+  expiresIn: string;
+}
+
+/** A freshly created token. `secret` is shown this once; never store or log it. */
+export interface CreatedApiToken {
+  token: ApiTokenInfo;
+  secret: string;
 }
 
 /** A team's quota limits and current server-side usage. */
@@ -755,6 +799,45 @@ function toLifecycle(lifecycle: Lifecycle): SandboxLifecycle {
       ? {}
       : { restartOnFailure: lifecycle.restartOnFailure }),
   };
+}
+
+function toApiToken(token: APITokenList["tokens"][number]): ApiTokenInfo {
+  return {
+    id: token.id,
+    name: token.name,
+    role: token.role,
+    team: token.team,
+    createdBy: token.createdBy,
+    createdAt: token.createdAt,
+    expiresAt: token.expiresAt,
+    expired: token.expired === true,
+  };
+}
+
+const TOKEN_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const GO_DURATION = /^(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|s|m|h|d))+$/;
+
+/** Checks a create request against the server's documented rules before sending it. */
+export function validateCreateApiToken(input: CreateApiTokenInput): CreateAPITokenOptions {
+  const name = input.name.trim();
+  if (!TOKEN_NAME.test(name)) {
+    throw new Error("Token names are 1-64 of A-Z, a-z, 0-9, dot, underscore or hyphen.");
+  }
+  if (!API_TOKEN_ROLES.includes(input.role)) {
+    throw new Error("Role must be viewer, runner, auditor or admin.");
+  }
+  const team = input.team.trim();
+  if (!team) {
+    throw new Error('Enter a team name, or "*" for every team.');
+  }
+  if ((input.role === "auditor" || input.role === "admin") && team !== "*") {
+    throw new Error(`The ${input.role} role needs team "*" (every team).`);
+  }
+  const expiresIn = input.expiresIn.trim();
+  if (!GO_DURATION.test(expiresIn)) {
+    throw new Error('Expiry must be a duration such as "90d", "720h" or "30m".');
+  }
+  return { name, role: input.role, team, expiresIn };
 }
 
 function toInfo(sandbox: SdkSandbox): SandboxInfo {
@@ -1468,7 +1551,37 @@ export class LewdevApi {
       role: who.role,
       ...(who.team === undefined ? {} : { team: who.team }),
       ...(who.expiresAt === undefined ? {} : { expiresAt: who.expiresAt }),
+      ...(who.principal?.kind === undefined ? {} : { principalKind: who.principal.kind }),
+      ...(who.principal?.id === undefined ? {} : { principalId: who.principal.id }),
+      ...(who.principal?.name === undefined ? {} : { principalName: who.principal.name }),
     };
+  }
+
+  /** Every API token, newest first (auditor or admin). Expired ones stay for 30 days. */
+  async listApiTokens(): Promise<ApiTokenInfo[]> {
+    const list = await this.sdk.tokens.list();
+    return (list.tokens ?? [])
+      .map(toApiToken)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  }
+
+  /**
+   * Mints a token (admin only). The secret comes back this once: the caller
+   * must show it and drop it, never persist or log it.
+   */
+  async createApiToken(input: CreateApiTokenInput): Promise<CreatedApiToken> {
+    const options = validateCreateApiToken(input);
+    const created = await this.sdk.tokens.create(options);
+    return { token: toApiToken(created), secret: created.token };
+  }
+
+  /** Revokes a token by its `tok_…` id (admin only). Revoking one already gone succeeds. */
+  async revokeApiToken(id: string): Promise<void> {
+    const trimmed = id.trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(trimmed)) {
+      throw new Error("That is not a valid token id.");
+    }
+    await this.sdk.tokens.revoke(trimmed);
   }
 
   async getTeamQuota(team: string): Promise<TeamQuotaInfo> {
