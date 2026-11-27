@@ -1,17 +1,28 @@
 import {
+  type AddCustomDomainOptions,
+  type AuditEvent,
+  type AuditOptions,
+  type AuditPage,
   type BinaryLike,
   type CallOptions,
   type CreateOptions,
   type CreateSessionOptions,
   type CopyFileOptions,
   type CreateSnapshotOptions,
+  type CustomDomain,
+  type CustomDomainDNSRecords,
+  type CustomDomainStatus as SdkCustomDomainStatus,
   type DeleteFileOptions,
+  type DNSRecord,
+  type DNSRecordType as SdkDNSRecordType,
   type ExecRequest,
   type ExecResult,
   type ExposePortOptions,
   type FileInfo,
   type FileList,
   type FileMatch,
+  type IngressTarget,
+  type IngressTargetSource as SdkIngressTargetSource,
   type ListFilesOptions,
   type MakeDirOptions,
   type MoveFileOptions,
@@ -229,6 +240,23 @@ export interface SdkSandbox {
   ): Promise<void>;
   searchFiles(path: string, pattern: string, call?: CallOptions): Promise<string[]>;
   findInFiles(path: string, text: string, call?: CallOptions): Promise<FileMatch[]>;
+  /** Per-sandbox custom-hostname bindings. */
+  customDomains: {
+    add(
+      hostname: string,
+      options?: AddCustomDomainOptions,
+      call?: CallOptions,
+    ): Promise<CustomDomain[]>;
+    remove(hostname: string, call?: CallOptions): Promise<void>;
+    list(call?: CallOptions): Promise<CustomDomain[]>;
+    dns(call?: CallOptions): Promise<CustomDomainDNSRecords>;
+  };
+  getNetworkUsage(call?: CallOptions): Promise<SdkNetworkUsage>;
+  setNetworkLimits(
+    options: SdkSetNetworkLimitsOptions,
+    call?: CallOptions,
+  ): Promise<SdkNetworkUsage>;
+  audit(options?: AuditOptions, call?: CallOptions): Promise<AuditPage>;
 }
 
 /** The subset of `MicroVM` that lewdev depends on. Tests inject a fake. */
@@ -242,6 +270,10 @@ export interface AerolSdk {
   resize(id: string, options: ResizeOptions, call?: CallOptions): Promise<SdkSandbox>;
   updateLifecycle(id: string, lifecycle: Lifecycle, call?: CallOptions): Promise<SdkSandbox>;
   health(call?: CallOptions): Promise<HealthStatus>;
+  /** The cluster's ingress address(es), the target for custom-domain DNS. */
+  dns: {
+    target(call?: CallOptions): Promise<IngressTarget>;
+  };
   createSession(id: string, options: CreateSessionOptions, call?: CallOptions): Promise<Session>;
   listSessions(id: string, call?: CallOptions): Promise<Session[]>;
   getSession(id: string, sessionID: string, call?: CallOptions): Promise<Session>;
@@ -410,6 +442,136 @@ export interface SandboxCopyOptions {
 
 /** The upload source accepted by the SDK: a byte stream or an async iterable. */
 export type SandboxUploadData = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>;
+
+/**
+ * The SDK's network-usage wire shape. Version 0.8.3 does not re-export it from
+ * the package root, so lewdev keeps its own structural copy.
+ */
+interface SdkNetworkUsage {
+  sandboxID: string;
+  bytesIn: number;
+  bytesOut: number;
+  bytesInLimit: number;
+  bytesOutLimit: number;
+  quotaExceeded: boolean;
+  quotaExceededAt?: string;
+  lastSampledAt?: string;
+}
+
+/** The SDK's options for `setNetworkLimits`, which 0.8.3 does not re-export. */
+interface SdkSetNetworkLimitsOptions {
+  networkBytesInLimit?: number;
+  networkBytesOutLimit?: number;
+}
+
+/** A custom hostname's lifecycle; see the SDK's `CustomDomainStatus`. */
+export type CustomDomainStatus = SdkCustomDomainStatus;
+
+/** A custom hostname bound to a sandbox, detached from the SDK's wire type. */
+export interface CustomDomainInfo {
+  hostname: string;
+  status: CustomDomainStatus;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Container port traffic dials. Missing or `0` means the sandbox's toolbox port. */
+  targetPort?: number;
+}
+
+/** A DNS record type the daemon emits for custom-domain wiring. */
+export type DnsRecordType = SdkDNSRecordType;
+
+/** One ready-to-paste DNS record for a custom domain. */
+export interface DnsRecordInfo {
+  hostname: string;
+  type: DnsRecordType;
+  /** The leftmost label, or `@` for an apex domain. */
+  name: string;
+  value: string;
+  notes?: string;
+}
+
+/** Where the server derived the ingress address(es) from. */
+export type IngressTargetSource = SdkIngressTargetSource;
+
+/** The cluster's published ingress address(es) for custom-domain DNS. */
+export interface IngressTargetInfo {
+  hostname?: string;
+  ips: string[];
+  source: IngressTargetSource;
+}
+
+/** DNS records for a sandbox's custom-domain bindings and their ingress target. */
+export interface CustomDomainDNSInfo {
+  records: DnsRecordInfo[];
+  target: IngressTargetInfo;
+}
+
+export interface AddCustomDomainInput {
+  /** Container port to route to; omit for the sandbox's toolbox port. */
+  port?: number;
+}
+
+/** Per-sandbox network byte counters and their configured caps. */
+export interface NetworkUsageInfo {
+  bytesIn: number;
+  bytesOut: number;
+  bytesInLimit: number;
+  bytesOutLimit: number;
+  quotaExceeded: boolean;
+  quotaExceededAt?: string;
+  /** Missing until the server has produced at least one sample. */
+  lastSampledAt?: string;
+}
+
+/** Limits to set; omit a field to leave it unchanged, and use `0` for no limit. */
+export interface SetNetworkLimitsInput {
+  bytesInLimit?: number;
+  bytesOutLimit?: number;
+}
+
+/** One record from a sandbox's audit log. */
+export interface AuditEventInfo {
+  time: string;
+  /** `"egress"` for outbound connections and denials; secret kinds otherwise. */
+  kind?: string;
+  /** `"success"`, or `"failure"` for a denial. */
+  result: string;
+  reason?: string;
+  destination?: string;
+  network?: string;
+  actor?: string;
+  ref?: string;
+  eventID?: string;
+  incarnationID?: string;
+  /** Records lost at this point (a gap record). */
+  dropped?: number;
+}
+
+export interface AuditCoverageInfo {
+  /** Nodes that answered the audit query. */
+  answered: string[];
+  /** Nodes that could not answer. */
+  missing: string[];
+  /** True when some nodes could not answer. */
+  partial: boolean;
+}
+
+export interface AuditPageInfo {
+  events: AuditEventInfo[];
+  coverage: AuditCoverageInfo;
+  /** Pass back as `cursor` for the next page. */
+  nextCursor?: string;
+}
+
+export interface AuditQuery {
+  /** Only this kind, e.g. `"egress"`. */
+  kind?: string;
+  limit?: number;
+  cursor?: string;
+  incarnationID?: string;
+  caller?: string;
+}
 
 export interface CreatedSandbox {
   sandbox: SandboxInfo;
@@ -702,6 +864,116 @@ function toFileMatch(match: FileMatch): SandboxFileMatch {
     line: match.line,
     content: match.content,
   };
+}
+
+function toCustomDomain(domain: CustomDomain): CustomDomainInfo {
+  return {
+    hostname: domain.hostname,
+    status: domain.status,
+    ...(domain.lastError === undefined ? {} : { lastError: domain.lastError }),
+    createdAt: domain.createdAt,
+    updatedAt: domain.updatedAt,
+    ...(domain.targetPort === undefined ? {} : { targetPort: domain.targetPort }),
+  };
+}
+
+function toDnsRecord(record: DNSRecord): DnsRecordInfo {
+  return {
+    hostname: record.hostname,
+    type: record.type,
+    name: record.name,
+    value: record.value,
+    ...(record.notes === undefined ? {} : { notes: record.notes }),
+  };
+}
+
+function toIngressTarget(target: IngressTarget): IngressTargetInfo {
+  return {
+    ...(target.hostname === undefined ? {} : { hostname: target.hostname }),
+    ips: [...(target.ips ?? [])],
+    source: target.source,
+  };
+}
+
+function toCustomDomainDNS(records: CustomDomainDNSRecords): CustomDomainDNSInfo {
+  return {
+    records: records.records.map(toDnsRecord),
+    target: toIngressTarget(records.target),
+  };
+}
+
+function toNetworkUsage(usage: SdkNetworkUsage): NetworkUsageInfo {
+  return {
+    bytesIn: usage.bytesIn,
+    bytesOut: usage.bytesOut,
+    bytesInLimit: usage.bytesInLimit,
+    bytesOutLimit: usage.bytesOutLimit,
+    quotaExceeded: usage.quotaExceeded,
+    ...(usage.quotaExceededAt === undefined ? {} : { quotaExceededAt: usage.quotaExceededAt }),
+    ...(usage.lastSampledAt === undefined ? {} : { lastSampledAt: usage.lastSampledAt }),
+  };
+}
+
+function toAuditEvent(event: AuditEvent): AuditEventInfo {
+  return {
+    time: event.time,
+    ...(event.kind === undefined ? {} : { kind: event.kind }),
+    result: event.result,
+    ...(event.reason === undefined ? {} : { reason: event.reason }),
+    ...(event.destination === undefined ? {} : { destination: event.destination }),
+    ...(event.network === undefined ? {} : { network: event.network }),
+    ...(event.actor === undefined ? {} : { actor: event.actor }),
+    ...(event.ref === undefined ? {} : { ref: event.ref }),
+    ...(event.eventID === undefined ? {} : { eventID: event.eventID }),
+    ...(event.incarnationID === undefined ? {} : { incarnationID: event.incarnationID }),
+    ...(event.dropped === undefined ? {} : { dropped: event.dropped }),
+  };
+}
+
+function toAuditPage(page: AuditPage): AuditPageInfo {
+  return {
+    events: page.events.map(toAuditEvent),
+    coverage: {
+      answered: [...page.coverage.answered],
+      missing: [...page.coverage.missing],
+      partial: page.coverage.partial,
+    },
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+  };
+}
+
+function normalizeHostname(raw: string): string {
+  const hostname = raw.trim();
+  if (!hostname) {
+    throw new Error("Hostname is required.");
+  }
+  return hostname;
+}
+
+function validateNetworkLimit(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a whole number of bytes, or 0 for no limit (got ${value}).`);
+  }
+}
+
+function toAuditOptions(query: AuditQuery): AuditOptions {
+  const options: AuditOptions = {};
+  if (query.kind !== undefined && query.kind !== "") {
+    options.kind = query.kind;
+  }
+  if (query.limit !== undefined) {
+    options.limit = query.limit;
+  }
+  if (query.cursor !== undefined && query.cursor !== "") {
+    options.cursor = query.cursor;
+  }
+  if (query.incarnationID !== undefined && query.incarnationID !== "") {
+    options.incarnationID = query.incarnationID;
+  }
+  if (query.caller !== undefined && query.caller !== "") {
+    options.caller = query.caller;
+  }
+  return options;
 }
 
 /**
@@ -1058,6 +1330,72 @@ export class LewdevApi {
   async findInFiles(id: string, path: string, text: string): Promise<SandboxFileMatch[]> {
     const sandbox = await this.sdk.get(id);
     return (await sandbox.findInFiles(path, text)).map(toFileMatch);
+  }
+
+  async listCustomDomains(id: string): Promise<CustomDomainInfo[]> {
+    const sandbox = await this.sdk.get(id);
+    return (await sandbox.customDomains.list()).map(toCustomDomain);
+  }
+
+  /** Binds a hostname; the server lowercases it and returns the full binding list. */
+  async addCustomDomain(
+    id: string,
+    hostname: string,
+    input: AddCustomDomainInput = {},
+  ): Promise<CustomDomainInfo[]> {
+    const normalized = normalizeHostname(hostname);
+    if (input.port !== undefined) {
+      validatePort(input.port);
+    }
+    const sandbox = await this.sdk.get(id);
+    const domains =
+      input.port === undefined
+        ? await sandbox.customDomains.add(normalized)
+        : await sandbox.customDomains.add(normalized, { port: input.port });
+    return domains.map(toCustomDomain);
+  }
+
+  async removeCustomDomain(id: string, hostname: string): Promise<void> {
+    const normalized = normalizeHostname(hostname);
+    const sandbox = await this.sdk.get(id);
+    await sandbox.customDomains.remove(normalized);
+  }
+
+  /** The ready-to-paste DNS records for every custom domain bound to the sandbox. */
+  async customDomainDNS(id: string): Promise<CustomDomainDNSInfo> {
+    const sandbox = await this.sdk.get(id);
+    return toCustomDomainDNS(await sandbox.customDomains.dns());
+  }
+
+  /** The cluster's published ingress address(es) for custom-domain DNS. */
+  async getIngressTarget(): Promise<IngressTargetInfo> {
+    return toIngressTarget(await this.sdk.dns.target());
+  }
+
+  async getNetworkUsage(id: string): Promise<NetworkUsageInfo> {
+    const sandbox = await this.sdk.get(id);
+    return toNetworkUsage(await sandbox.getNetworkUsage());
+  }
+
+  /** Sets byte caps; `0` means no limit and an omitted field is left unchanged. */
+  async setNetworkLimits(id: string, input: SetNetworkLimitsInput): Promise<NetworkUsageInfo> {
+    const options: SdkSetNetworkLimitsOptions = {};
+    if (input.bytesInLimit !== undefined) {
+      validateNetworkLimit("Inbound limit", input.bytesInLimit);
+      options.networkBytesInLimit = input.bytesInLimit;
+    }
+    if (input.bytesOutLimit !== undefined) {
+      validateNetworkLimit("Outbound limit", input.bytesOutLimit);
+      options.networkBytesOutLimit = input.bytesOutLimit;
+    }
+    const sandbox = await this.sdk.get(id);
+    return toNetworkUsage(await sandbox.setNetworkLimits(options));
+  }
+
+  /** Reads one page of the sandbox's audit log; pass `cursor` for the next page. */
+  async getAuditLog(id: string, query: AuditQuery = {}): Promise<AuditPageInfo> {
+    const sandbox = await this.sdk.get(id);
+    return toAuditPage(await sandbox.audit(toAuditOptions(query)));
   }
 
   /** Loads every page of the caller's snapshots, following the name cursor. */

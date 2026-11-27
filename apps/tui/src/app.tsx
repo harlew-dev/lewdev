@@ -2,11 +2,14 @@ import {
   type AccountInfo,
   addAuthorizedKey,
   addSshInclude,
+  type AuditCoverageInfo,
+  type AuditEventInfo,
   type AuthorizedKey,
   backgroundUpdateCheck,
   cleanupDirectSsh,
   completeRemotePath,
   type CreateSandboxInput,
+  type CustomDomainInfo,
   deletePrivateKey,
   defaultDownloadFolder,
   describeError,
@@ -19,6 +22,7 @@ import {
   disableDirectSsh,
   directKeyExists,
   displayLocalPath,
+  type DnsRecordInfo,
   downloadToPath,
   enablePublicDirectSsh,
   ensureSshdRunning,
@@ -35,6 +39,7 @@ import {
   getSshConfigPath,
   getSshIncludeLine,
   hasSshInclude,
+  type IngressTargetInfo,
   inspectUploadSource,
   isHiddenRemoteName,
   isStandaloneBuild,
@@ -45,6 +50,7 @@ import {
   loadConfig,
   normalizeApiUrl,
   normalizeRemotePath,
+  type NetworkUsageInfo,
   joinRemotePath,
   parentRemotePath,
   prepareDownloadDestination,
@@ -91,16 +97,22 @@ import {
   actionKey,
   type ActionHint,
   type ActionId,
+  buildAddCustomDomainActions,
+  buildAuditLogActions,
   buildConnectActions,
   buildCreateSnapshotActions,
   buildCreateSnapshotConfirmActions,
+  buildCustomDomainsPageActions,
   buildDeleteActions,
   buildForgetHostActions,
   buildLifecycleActions,
+  buildNetworkLimitsActions,
+  buildNetworkUsageActions,
   buildNewSandboxActions,
   buildNewSnapshotActions,
   buildOpenPortActions,
   buildPortsPageActions,
+  buildRemoveCustomDomainActions,
   buildSandboxListActions,
   buildSandboxPageActions,
   buildAddSshKeyActions,
@@ -126,6 +138,15 @@ import {
 } from "./actions";
 import { readClipboard, writeClipboard } from "./clipboard";
 import {
+  ALL_AUDIT_KINDS,
+  auditCoverageNote,
+  auditFilterLabel,
+  auditKindOptions,
+  mergeAuditKinds,
+  sortAuditNewest,
+  type AuditKindOption,
+} from "./audit-view";
+import {
   BusyLine,
   Header,
   HomeTabs,
@@ -134,6 +155,13 @@ import {
   type ToastMessage,
   UsageBar,
 } from "./components";
+import {
+  CUSTOM_DOMAIN_DEFAULT,
+  CUSTOM_DOMAIN_FIELDS,
+  customDomainInput,
+  type CustomDomainField,
+  type CustomDomainFormValues,
+} from "./domain-form";
 import { safeHost, sandboxLabel } from "./format";
 import {
   clampFilesSelection,
@@ -226,6 +254,22 @@ import {
 } from "./resize-form";
 import { LifecycleScreen } from "./screens/lifecycle";
 import { KillSessionScreen } from "./screens/kill-session";
+import { AddCustomDomainScreen } from "./screens/add-custom-domain";
+import { AuditLogScreen } from "./screens/audit-log";
+import { CustomDomainsScreen } from "./screens/custom-domains";
+import { NetworkLimitsScreen } from "./screens/network-limits";
+import { NetworkUsageScreen } from "./screens/network-usage";
+import { RemoveCustomDomainScreen } from "./screens/remove-custom-domain";
+import {
+  appendLimitChar,
+  moveLimitUnit,
+  networkLimitWarning,
+  networkLimitsFromUsage,
+  networkLimitsInput,
+  nextNetworkLimitsFocus,
+  type NetworkLimitsFocus,
+  type NetworkLimitsValues,
+} from "./network-form";
 import { ResizeScreen } from "./screens/resize";
 import { EnablePublicSshScreen } from "./screens/enable-public-ssh";
 import { ForgetHostScreen } from "./screens/forget-host";
@@ -266,6 +310,10 @@ import { colors } from "./theme";
 import { VERSION } from "./version";
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
+
+/** Shown when the server answers 412 because custom domains are switched off. */
+const CUSTOM_DOMAINS_OFF =
+  "Custom domains are not enabled on this AerolVM server. Ask its operator to turn them on.";
 
 /** Selection value for the "+ New …" row at the end of a list. */
 const NEW_ROW = "\u0000new";
@@ -481,6 +529,37 @@ export function App() {
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
   /** The sandbox action the user left from, restored when a sub-page pops back. */
   const sandboxActionRef = useRef<ActionId | null>(null);
+  const [customDomains, setCustomDomains] = useState<CustomDomainInfo[]>([]);
+  const [customDomainsLoading, setCustomDomainsLoading] = useState(false);
+  const [customDomainsError, setCustomDomainsError] = useState<string | null>(null);
+  const [domainSelected, setDomainSelected] = useState(0);
+  const [domainForm, setDomainForm] = useState<CustomDomainFormValues>(CUSTOM_DOMAIN_DEFAULT);
+  const [domainFocus, setDomainFocus] = useState<CustomDomainField>("hostname");
+  const [domainFormError, setDomainFormError] = useState<string | null>(null);
+  const [domainAdded, setDomainAdded] = useState(false);
+  const [domainRecords, setDomainRecords] = useState<DnsRecordInfo[]>([]);
+  const [domainTarget, setDomainTarget] = useState<IngressTargetInfo | null>(null);
+  const [domainRecordsLoading, setDomainRecordsLoading] = useState(false);
+  const [domainRecordsError, setDomainRecordsError] = useState<string | null>(null);
+  const [removeDomainError, setRemoveDomainError] = useState<string | null>(null);
+  const [networkUsage, setNetworkUsage] = useState<NetworkUsageInfo | null>(null);
+  const [networkUsageLoading, setNetworkUsageLoading] = useState(false);
+  const [networkUsageError, setNetworkUsageError] = useState<string | null>(null);
+  const [networkLimitsValues, setNetworkLimitsValues] = useState<NetworkLimitsValues | null>(null);
+  const [networkLimitsFocus, setNetworkLimitsFocus] = useState<NetworkLimitsFocus>("in-unit");
+  const [networkLimitsWarning, setNetworkLimitsWarning] = useState<string | null>(null);
+  const [networkLimitsError, setNetworkLimitsError] = useState<string | null>(null);
+  const [auditEvents, setAuditEvents] = useState<AuditEventInfo[]>([]);
+  const [auditCoverage, setAuditCoverage] = useState<AuditCoverageInfo | null>(null);
+  const [auditNextCursor, setAuditNextCursor] = useState<string | undefined>(undefined);
+  const [auditKind, setAuditKind] = useState<string | null>(null);
+  const [auditKinds, setAuditKinds] = useState<string[]>([]);
+  const [auditSelected, setAuditSelected] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditLoadingMore, setAuditLoadingMore] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditKindMenuOpen, setAuditKindMenuOpen] = useState(false);
+  const [auditKindMenuIndex, setAuditKindMenuIndex] = useState(0);
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -688,6 +767,94 @@ export function App() {
       } finally {
         if (showLoading) {
           setSessionsLoading(false);
+        }
+      }
+    },
+    [api, sandboxId],
+  );
+
+  const refreshCustomDomains = useCallback(
+    async (showLoading = false): Promise<CustomDomainInfo[]> => {
+      if (!api || !sandboxId) {
+        return [];
+      }
+      if (showLoading) {
+        setCustomDomainsLoading(true);
+      }
+      try {
+        const items = await api.listCustomDomains(sandboxId);
+        setCustomDomains(items);
+        setCustomDomainsError(null);
+        return items;
+      } catch (error) {
+        const message = describeError(error);
+        setCustomDomainsError(
+          /not enabled on this deployment/i.test(message) ? CUSTOM_DOMAINS_OFF : message,
+        );
+        return [];
+      } finally {
+        if (showLoading) {
+          setCustomDomainsLoading(false);
+        }
+      }
+    },
+    [api, sandboxId],
+  );
+
+  const refreshNetworkUsage = useCallback(
+    async (showLoading = false): Promise<void> => {
+      if (!api || !sandboxId) {
+        return;
+      }
+      if (showLoading) {
+        setNetworkUsageLoading(true);
+      }
+      try {
+        setNetworkUsage(await api.getNetworkUsage(sandboxId));
+        setNetworkUsageError(null);
+      } catch (error) {
+        setNetworkUsageError(describeError(error));
+      } finally {
+        if (showLoading) {
+          setNetworkUsageLoading(false);
+        }
+      }
+    },
+    [api, sandboxId],
+  );
+
+  const loadAuditPage = useCallback(
+    async (options: { kind: string | null; cursor?: string; append?: boolean }): Promise<void> => {
+      if (!api || !sandboxId) {
+        return;
+      }
+      const append = options.append === true;
+      if (append) {
+        setAuditLoadingMore(true);
+      } else {
+        setAuditLoading(true);
+      }
+      try {
+        const page = await api.getAuditLog(sandboxId, {
+          ...(options.kind === null ? {} : { kind: options.kind }),
+          ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+        });
+        setAuditEvents((previous) => (append ? [...previous, ...page.events] : page.events));
+        setAuditCoverage(page.coverage);
+        setAuditNextCursor(page.nextCursor);
+        setAuditKinds((previous) => mergeAuditKinds(previous, page.events));
+        setAuditError(null);
+      } catch (error) {
+        setAuditError(describeError(error));
+        if (!append) {
+          setAuditCoverage(null);
+          setAuditNextCursor(undefined);
+        }
+      } finally {
+        if (append) {
+          setAuditLoadingMore(false);
+        } else {
+          setAuditLoading(false);
         }
       }
     },
@@ -938,6 +1105,58 @@ export function App() {
   }, [api, page.kind, refreshSessions]);
 
   useEffect(() => {
+    if (!api || page.kind !== "custom-domains" || !sandboxId) {
+      return;
+    }
+    void refreshCustomDomains(true);
+    const timer = setInterval(() => {
+      void refreshCustomDomains(false);
+    }, 3000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [api, page.kind, sandboxId, refreshCustomDomains]);
+
+  useEffect(() => {
+    if (!api || page.kind !== "network-usage" || !sandboxId) {
+      return;
+    }
+    void refreshNetworkUsage(true);
+    const timer = setInterval(() => {
+      void refreshNetworkUsage(false);
+    }, 5000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [api, page.kind, sandboxId, refreshNetworkUsage]);
+
+  useEffect(() => {
+    if (!api || page.kind !== "network-limits" || !sandboxId || networkUsage !== null) {
+      return;
+    }
+    void refreshNetworkUsage(false);
+  }, [api, page.kind, sandboxId, networkUsage, refreshNetworkUsage]);
+
+  useEffect(() => {
+    if (!api || page.kind !== "audit-log" || !sandboxId) {
+      return;
+    }
+    setAuditEvents([]);
+    setAuditCoverage(null);
+    setAuditNextCursor(undefined);
+    setAuditSelected(0);
+    setAuditError(null);
+    setAuditKindMenuOpen(false);
+    void loadAuditPage({ kind: auditKind });
+  }, [api, page.kind, sandboxId, auditKind, loadAuditPage]);
+
+  useEffect(() => {
+    setDomainSelected((previous) =>
+      customDomains.length === 0 ? 0 : Math.min(previous, customDomains.length - 1),
+    );
+  }, [customDomains.length]);
+
+  useEffect(() => {
     setSessionSelected((previous) =>
       sessions.length === 0 ? 0 : Math.min(previous, sessions.length - 1),
     );
@@ -1182,6 +1401,20 @@ export function App() {
     [files.entries, files.filter],
   );
 
+  const auditSorted = useMemo(() => sortAuditNewest(auditEvents), [auditEvents]);
+  const auditKindChoices = useMemo<AuditKindOption[]>(
+    () => auditKindOptions(auditKinds),
+    [auditKinds],
+  );
+  const auditHasMore = auditNextCursor !== undefined;
+  const auditCoverageText = auditCoverage ? auditCoverageNote(auditCoverage) : null;
+  const auditFilterText = auditFilterLabel(auditKind);
+
+  useEffect(() => {
+    const last = auditSorted.length + (auditHasMore ? 0 : -1);
+    setAuditSelected((previous) => Math.max(0, Math.min(previous, last)));
+  }, [auditSorted.length, auditHasMore]);
+
   useEffect(() => {
     setFiles((previous) => {
       const selected = clampFilesSelection(previous.selected, filesEntries.length);
@@ -1303,6 +1536,24 @@ export function App() {
           hasSelectedPort: portSelected < count,
         });
       }
+      case "custom-domains":
+        return buildCustomDomainsPageActions({
+          hasDomains: customDomains.length > 0,
+          hasSelectedDomain: domainSelected < customDomains.length,
+          ...(customDomainsError === CUSTOM_DOMAINS_OFF
+            ? { unavailableReason: CUSTOM_DOMAINS_OFF }
+            : {}),
+        });
+      case "add-custom-domain":
+        return buildAddCustomDomainActions({ added: domainAdded });
+      case "remove-custom-domain":
+        return buildRemoveCustomDomainActions();
+      case "network-usage":
+        return buildNetworkUsageActions({ hasUsage: networkUsage !== null });
+      case "network-limits":
+        return buildNetworkLimitsActions();
+      case "audit-log":
+        return buildAuditLogActions({ hasMore: auditNextCursor !== undefined });
       case "open-port":
         return buildOpenPortActions();
       case "files":
@@ -1326,6 +1577,7 @@ export function App() {
         return [];
     }
   }, [
+    customDomainsError,
     page,
     pageDetails,
     config,
@@ -1344,6 +1596,11 @@ export function App() {
     gatewayHost,
     sessions,
     sessionSelected,
+    customDomains,
+    domainSelected,
+    domainAdded,
+    networkUsage,
+    auditNextCursor,
   ]);
 
   const selectedActionIndex = actionIndex(actions, selectedActionId);
@@ -1660,6 +1917,96 @@ export function App() {
       }
       case "close-port":
         void closeSelectedPort();
+        return;
+      case "custom-domains": {
+        const target = actionTarget();
+        if (target) {
+          setCustomDomains([]);
+          setCustomDomainsError(null);
+          setDomainSelected(0);
+          pushSandboxScoped({ kind: "custom-domains", ...target });
+        }
+        return;
+      }
+      case "add-custom-domain": {
+        const target = actionTarget();
+        if (target) {
+          setDomainForm(CUSTOM_DOMAIN_DEFAULT);
+          setDomainFocus("hostname");
+          setDomainFormError(null);
+          setDomainAdded(false);
+          setDomainRecords([]);
+          setDomainTarget(null);
+          setDomainRecordsError(null);
+          setDomainRecordsLoading(false);
+          pushSandboxScoped({ kind: "add-custom-domain", ...target });
+        }
+        return;
+      }
+      case "remove-custom-domain": {
+        const target = actionTarget();
+        const domain = customDomains[domainSelected];
+        if (target && domain) {
+          setRemoveDomainError(null);
+          pushSandboxScoped({
+            kind: "remove-custom-domain",
+            hostname: domain.hostname,
+            ...target,
+          });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-remove-custom-domain":
+        void performRemoveCustomDomain();
+        return;
+      case "network-usage": {
+        const target = actionTarget();
+        if (target) {
+          setNetworkUsage(null);
+          setNetworkUsageError(null);
+          pushSandboxScoped({ kind: "network-usage", ...target });
+        }
+        return;
+      }
+      case "network-limits": {
+        const target = actionTarget();
+        if (target && networkUsage) {
+          const values = networkLimitsFromUsage(networkUsage);
+          setNetworkLimitsValues(values);
+          setNetworkLimitsFocus(values.inbound.unit === "none" ? "in-unit" : "in-value");
+          setNetworkLimitsWarning(null);
+          setNetworkLimitsError(null);
+          pushSandboxScoped({ kind: "network-limits", ...target });
+        }
+        return;
+      }
+      case "audit-log": {
+        const target = actionTarget();
+        if (target) {
+          setAuditKind(null);
+          setAuditKinds([]);
+          setAuditSelected(0);
+          setAuditKindMenuOpen(false);
+          setAuditKindMenuIndex(0);
+          pushSandboxScoped({ kind: "audit-log", ...target });
+        }
+        return;
+      }
+      case "filter-audit": {
+        if (auditKindMenuOpen) {
+          setAuditKindMenuOpen(false);
+          return;
+        }
+        const current = auditKindChoices.findIndex(
+          (option) => option.id === (auditKind ?? ALL_AUDIT_KINDS),
+        );
+        setAuditKindMenuIndex(Math.max(0, current));
+        setAuditKindMenuOpen(true);
+        return;
+      }
+      case "load-more-audit":
+        void loadMoreAudit();
         return;
       case "copy-ssh":
         void copySshCommand();
@@ -3168,12 +3515,138 @@ export function App() {
       case "open-port":
         void submitPort();
         return;
+      case "add-custom-domain":
+        void submitCustomDomain();
+        return;
+      case "network-limits":
+        void submitNetworkLimits();
+        return;
       case "add-ssh-key":
         void submitAddSshKey();
         return;
       default:
         return;
     }
+  }
+
+  async function loadDomainRecords(id: string): Promise<void> {
+    if (!api) {
+      return;
+    }
+    setDomainRecordsLoading(true);
+    try {
+      const dns = await api.customDomainDNS(id);
+      setDomainRecords(dns.records);
+      setDomainTarget(dns.target);
+      setDomainRecordsError(null);
+    } catch (error) {
+      setDomainRecordsError(describeError(error));
+    } finally {
+      setDomainRecordsLoading(false);
+    }
+  }
+
+  async function submitCustomDomain(): Promise<void> {
+    const target = pageSandbox(page);
+    if (!api || !target || busyMessage) {
+      return;
+    }
+    let input: ReturnType<typeof customDomainInput>;
+    try {
+      input = customDomainInput(domainForm);
+    } catch (error) {
+      setDomainFormError(describeError(error));
+      return;
+    }
+    setDomainFormError(null);
+    setBusyMessage(`Adding ${input.hostname}…`);
+    try {
+      await api.addCustomDomain(
+        target.id,
+        input.hostname,
+        input.port === undefined ? {} : { port: input.port },
+      );
+      setDomainAdded(true);
+      await refreshCustomDomains(false);
+      await loadDomainRecords(target.id);
+      showToast("success", `Added ${input.hostname}. Create its DNS records next.`);
+    } catch (error) {
+      setDomainFormError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performRemoveCustomDomain(): Promise<void> {
+    if (page.kind !== "remove-custom-domain" || !api) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target || busyMessage) {
+      return;
+    }
+    const hostname = page.hostname;
+    setBusyMessage(`Removing ${hostname}…`);
+    try {
+      await api.removeCustomDomain(target.id, hostname);
+      await refreshCustomDomains(false);
+      setStack((previous) => popPage(previous));
+      showToast("success", `Removed ${hostname}.`);
+    } catch (error) {
+      setRemoveDomainError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitNetworkLimits(): Promise<void> {
+    const target = pageSandbox(page);
+    if (!api || !target || !networkLimitsValues || busyMessage) {
+      return;
+    }
+    let input: ReturnType<typeof networkLimitsInput>;
+    try {
+      input = networkLimitsInput(networkLimitsValues);
+    } catch (error) {
+      setNetworkLimitsError(describeError(error));
+      return;
+    }
+    setNetworkLimitsError(null);
+    if (networkUsage) {
+      const warning = networkLimitWarning(networkLimitsValues, networkUsage);
+      if (warning !== null && networkLimitsWarning === null) {
+        setNetworkLimitsWarning(warning);
+        return;
+      }
+    }
+    setNetworkLimitsWarning(null);
+    setBusyMessage("Saving network limits…");
+    try {
+      setNetworkUsage(await api.setNetworkLimits(target.id, input));
+      setStack((previous) => popPage(previous));
+      showToast("success", "Saved network limits.");
+    } catch (error) {
+      setNetworkLimitsError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  function loadMoreAudit(): void {
+    if (auditLoadingMore || auditNextCursor === undefined) {
+      return;
+    }
+    void loadAuditPage({ kind: auditKind, cursor: auditNextCursor, append: true });
+  }
+
+  function chooseAuditKind(index: number): void {
+    const option = auditKindChoices[index];
+    if (!option) {
+      return;
+    }
+    setAuditKind(option.id === ALL_AUDIT_KINDS ? null : option.id);
+    setAuditKindMenuIndex(index);
+    setAuditKindMenuOpen(false);
   }
 
   async function pasteFromClipboard(): Promise<void> {
@@ -3807,6 +4280,10 @@ export function App() {
         );
       case "open-port":
         return portForm !== null && portForm.field !== "submit";
+      case "add-custom-domain":
+        return !domainAdded && domainFocus !== "submit";
+      case "network-limits":
+        return networkLimitsFocus !== "submit";
       default:
         return false;
     }
@@ -3865,6 +4342,44 @@ export function App() {
 
     if (page.kind === "add-ssh-key") {
       setNewSshKey((previous) => appendText(previous, text));
+      return;
+    }
+    if (page.kind === "add-custom-domain") {
+      if (domainAdded || domainFocus === "submit") {
+        return;
+      }
+      const value = domainFocus === "port" ? text.replace(/\D+/g, "") : text;
+      if (!value) {
+        return;
+      }
+      setDomainForm((previous) => ({
+        ...previous,
+        [domainFocus]: appendText(previous[domainFocus], value),
+      }));
+      setDomainFormError(null);
+      return;
+    }
+    if (page.kind === "network-limits" && networkLimitsValues) {
+      if (networkLimitsFocus !== "in-value" && networkLimitsFocus !== "out-value") {
+        return;
+      }
+      const value = text.replace(/[^\d.]/g, "");
+      if (!value) {
+        return;
+      }
+      const field = networkLimitsFocus === "in-value" ? "inbound" : "outbound";
+      setNetworkLimitsValues((previous) => {
+        if (!previous) {
+          return previous;
+        }
+        let nextValue = previous[field].value;
+        for (const char of value) {
+          nextValue = appendLimitChar(nextValue, char);
+        }
+        return { ...previous, [field]: { ...previous[field], value: nextValue } };
+      });
+      setNetworkLimitsWarning(null);
+      setNetworkLimitsError(null);
       return;
     }
     if (page.kind === "vscode-directory") {
@@ -4299,6 +4814,194 @@ export function App() {
       }
     }
 
+    if (page.kind === "custom-domains") {
+      const last = Math.max(0, customDomains.length - 1);
+      if (key.name === "down" || actionKey(key) === "j") {
+        setDomainSelected((previous) => Math.min(previous + 1, last));
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        setDomainSelected((previous) => Math.max(previous - 1, 0));
+        return;
+      }
+    }
+
+    if (page.kind === "add-custom-domain" && !domainAdded) {
+      if (key.name === "tab" || key.name === "backtab") {
+        key.preventDefault();
+        const delta = key.name === "backtab" || key.shift ? -1 : 1;
+        setDomainFocus((current) => nextField(CUSTOM_DOMAIN_FIELDS, current, delta));
+        return;
+      }
+      if (key.name === "down" || key.name === "up") {
+        const delta = key.name === "down" ? 1 : -1;
+        setDomainFocus((current) => nextField(CUSTOM_DOMAIN_FIELDS, current, delta));
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        if (domainFocus !== "submit") {
+          setDomainFocus((current) => nextField(CUSTOM_DOMAIN_FIELDS, current, 1));
+          return;
+        }
+      } else {
+        if (domainFocus === "submit") {
+          return;
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          setDomainForm((previous) => ({
+            ...previous,
+            [domainFocus]: removeLastChar(previous[domainFocus]),
+          }));
+          setDomainFormError(null);
+          return;
+        }
+        const char = printableChar(key);
+        if (!char) {
+          return;
+        }
+        if (domainFocus === "port" && !/^\d$/.test(char)) {
+          return;
+        }
+        setDomainForm((previous) => ({
+          ...previous,
+          [domainFocus]: appendText(previous[domainFocus], char),
+        }));
+        setDomainFormError(null);
+        return;
+      }
+    }
+
+    if (page.kind === "network-limits" && networkLimitsValues) {
+      const values = networkLimitsValues;
+      if (
+        key.name === "tab" ||
+        key.name === "backtab" ||
+        key.name === "down" ||
+        key.name === "up"
+      ) {
+        if (key.name === "tab" || key.name === "backtab") {
+          key.preventDefault();
+        }
+        const delta =
+          key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift) ? -1 : 1;
+        setNetworkLimitsFocus((current) => nextNetworkLimitsFocus(values, current, delta));
+        return;
+      }
+      if (
+        (networkLimitsFocus === "in-unit" || networkLimitsFocus === "out-unit") &&
+        (key.name === "left" || key.name === "right")
+      ) {
+        const field = networkLimitsFocus === "in-unit" ? "inbound" : "outbound";
+        const delta = key.name === "left" ? -1 : 1;
+        const enabled = values[field].unit === "none";
+        setNetworkLimitsValues((previous) =>
+          previous
+            ? {
+                ...previous,
+                [field]: {
+                  ...previous[field],
+                  unit: moveLimitUnit(previous[field].unit, delta),
+                },
+              }
+            : previous,
+        );
+        if (enabled) {
+          setNetworkLimitsFocus(field === "inbound" ? "in-value" : "out-value");
+        }
+        setNetworkLimitsWarning(null);
+        setNetworkLimitsError(null);
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        if (networkLimitsFocus !== "submit") {
+          setNetworkLimitsFocus((current) => nextNetworkLimitsFocus(values, current, 1));
+          return;
+        }
+      } else {
+        if (networkLimitsFocus === "submit") {
+          return;
+        }
+        if (networkLimitsFocus === "in-unit" || networkLimitsFocus === "out-unit") {
+          return;
+        }
+        const field = networkLimitsFocus === "in-value" ? "inbound" : "outbound";
+        if (key.name === "backspace" || key.name === "delete") {
+          setNetworkLimitsValues((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  [field]: { ...previous[field], value: removeLastChar(previous[field].value) },
+                }
+              : previous,
+          );
+          setNetworkLimitsWarning(null);
+          setNetworkLimitsError(null);
+          return;
+        }
+        const char = printableChar(key);
+        if (!char) {
+          return;
+        }
+        setNetworkLimitsValues((previous) =>
+          previous
+            ? {
+                ...previous,
+                [field]: {
+                  ...previous[field],
+                  value: appendLimitChar(previous[field].value, char),
+                },
+              }
+            : previous,
+        );
+        setNetworkLimitsWarning(null);
+        setNetworkLimitsError(null);
+        return;
+      }
+    }
+
+    if (page.kind === "audit-log") {
+      if (auditKindMenuOpen) {
+        if (key.name === "down" || actionKey(key) === "j") {
+          setAuditKindMenuIndex((index) =>
+            Math.min(index + 1, Math.max(0, auditKindChoices.length - 1)),
+          );
+          return;
+        }
+        if (key.name === "up" || actionKey(key) === "k") {
+          setAuditKindMenuIndex((index) => Math.max(index - 1, 0));
+          return;
+        }
+        if (key.name === "return" || key.name === "enter" || key.name === "space") {
+          key.preventDefault();
+          chooseAuditKind(auditKindMenuIndex);
+          return;
+        }
+        if (key.name === "escape" || actionKey(key) === "f") {
+          setAuditKindMenuOpen(false);
+          return;
+        }
+        return;
+      }
+      const last = auditSorted.length + (auditHasMore ? 0 : -1);
+      if (key.name === "down" || actionKey(key) === "j") {
+        setAuditSelected((previous) => Math.min(previous + 1, Math.max(0, last)));
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        setAuditSelected((previous) => Math.max(previous - 1, 0));
+        return;
+      }
+      if (
+        (key.name === "return" || key.name === "enter") &&
+        auditHasMore &&
+        auditSelected >= auditSorted.length
+      ) {
+        key.preventDefault();
+        loadMoreAudit();
+        return;
+      }
+    }
+
     if (page.kind === "add-ssh-key" && !key.ctrl && !key.meta) {
       if (key.name === "backspace" || key.name === "delete") {
         setNewSshKey((previous) => removeLastChar(previous));
@@ -4480,7 +5183,9 @@ export function App() {
       page.kind === "confirm-create-snapshot" ||
       page.kind === "trust-hosts" ||
       page.kind === "forget-host" ||
-      page.kind === "kill-session"
+      page.kind === "kill-session" ||
+      page.kind === "network-usage" ||
+      page.kind === "remove-custom-domain"
     ) {
       if (key.name === "down" || actionKey(key) === "j") {
         moveAction(1);
@@ -5097,6 +5802,61 @@ export function App() {
     if (page.kind === "ports") {
       return actionHints(actions, { extra: [["↑/↓", "move"]] });
     }
+    if (page.kind === "custom-domains") {
+      return actionHints(actions, { extra: [["↑/↓", "domain"]] });
+    }
+    if (page.kind === "add-custom-domain") {
+      if (domainAdded) {
+        return actionHints(actions);
+      }
+      return actionHints(
+        actions.filter((entry) => entry.id !== "submit"),
+        {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+            ["enter", "next field"],
+          ],
+        },
+      );
+    }
+    if (page.kind === "remove-custom-domain" || page.kind === "network-usage") {
+      return actionHints(actions, { selection: true });
+    }
+    if (page.kind === "network-limits") {
+      if (networkLimitsFocus === "submit") {
+        return actionHints(actions, {
+          extra: [
+            ["↑/↓", "field"],
+            ["tab", "next field"],
+          ],
+        });
+      }
+      const extra: ActionHint[] = [
+        ["↑/↓", "field"],
+        ["tab", "next field"],
+        ["enter", "next field"],
+        ["←/→", "unit"],
+      ];
+      return actionHints(
+        actions.filter((entry) => entry.id !== "submit"),
+        { extra },
+      );
+    }
+    if (page.kind === "audit-log") {
+      if (auditKindMenuOpen) {
+        return [
+          ["↑/↓", "kind"],
+          ["enter", "pick"],
+          ["esc", "close"],
+        ];
+      }
+      const extra: ActionHint[] = [["↑/↓", "event"]];
+      if (auditHasMore) {
+        extra.push(["enter", "load more"]);
+      }
+      return actionHints(actions, { extra });
+    }
     if (page.kind === "sessions") {
       return actionHints(actions, { extra: [["↑/↓", "session"]] });
     }
@@ -5354,6 +6114,10 @@ export function App() {
     lifecycleFocus,
     resizeFocus,
     files,
+    domainAdded,
+    networkLimitsFocus,
+    auditKindMenuOpen,
+    auditHasMore,
   ]);
 
   const helpGlobalHints = useMemo<ActionHint[]>(() => {
@@ -5625,6 +6389,86 @@ export function App() {
           visibilityMenuOpen={visibilityMenuOpen}
           visibilityMenuIndex={visibilityMenuIndex}
           error={portFormError}
+        />
+      );
+      break;
+    case "custom-domains":
+      content = (
+        <CustomDomainsScreen
+          domains={customDomains}
+          selected={domainSelected}
+          loading={customDomainsLoading}
+          error={customDomainsError}
+        />
+      );
+      break;
+    case "add-custom-domain":
+      content = (
+        <AddCustomDomainScreen
+          values={domainForm}
+          focus={domainFocus}
+          added={domainAdded}
+          records={domainRecords}
+          target={domainTarget}
+          recordsLoading={domainRecordsLoading}
+          recordsError={domainRecordsError}
+          error={domainFormError}
+        />
+      );
+      break;
+    case "remove-custom-domain":
+      content = (
+        <RemoveCustomDomainScreen
+          hostname={page.hostname}
+          error={removeDomainError}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "network-usage":
+      content = (
+        <NetworkUsageScreen
+          usage={networkUsage}
+          loading={networkUsageLoading}
+          error={networkUsageError}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
+    case "network-limits":
+      content = networkLimitsValues ? (
+        <NetworkLimitsScreen
+          values={networkLimitsValues}
+          focus={networkLimitsFocus}
+          usage={networkUsage}
+          warning={networkLimitsWarning}
+          error={networkLimitsError}
+        />
+      ) : (
+        <LoadingPanel
+          loading={networkUsageLoading}
+          error={networkUsageError}
+          title="Network limits"
+          fallback="Network usage is unavailable, so limits cannot be edited."
+        />
+      );
+      break;
+    case "audit-log":
+      content = (
+        <AuditLogScreen
+          events={auditSorted}
+          selected={auditSelected}
+          loading={auditLoading}
+          loadingMore={auditLoadingMore}
+          error={auditError}
+          hasMore={auditHasMore}
+          filterLabel={auditFilterText}
+          kindMenuOpen={auditKindMenuOpen}
+          kindOptions={auditKindChoices}
+          kindMenuIndex={auditKindMenuIndex}
+          coverageNote={auditCoverageText}
         />
       );
       break;

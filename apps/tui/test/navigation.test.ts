@@ -58,6 +58,14 @@ describe("page stack", () => {
     expect(pageSandbox({ kind: "trust-hosts", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "files", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "custom-domains", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "add-custom-domain", ...myBox })).toEqual(myBox);
+    expect(
+      pageSandbox({ kind: "remove-custom-domain", hostname: "api.example.com", ...myBox }),
+    ).toEqual(myBox);
+    expect(pageSandbox({ kind: "network-usage", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "network-limits", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "audit-log", ...myBox })).toEqual(myBox);
   });
 
   test("inserts the sandbox page below a sub-page opened from the list", () => {
@@ -117,6 +125,27 @@ describe("breadcrumbs", () => {
         ),
       ),
     ).toEqual(["Sandboxes", "my-box", "SSH settings", "Trust host keys"]);
+    expect(
+      breadcrumbTrail(
+        stackOf(
+          { kind: "sandbox", ...myBox },
+          { kind: "custom-domains", ...myBox },
+          { kind: "add-custom-domain", ...myBox },
+        ),
+      ),
+    ).toEqual(["Sandboxes", "my-box", "Custom domains", "Add domain"]);
+    expect(
+      breadcrumbTrail(
+        stackOf(
+          { kind: "sandbox", ...myBox },
+          { kind: "network-usage", ...myBox },
+          { kind: "network-limits", ...myBox },
+        ),
+      ),
+    ).toEqual(["Sandboxes", "my-box", "Network usage", "Network limits"]);
+    expect(
+      breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "audit-log", ...myBox })),
+    ).toEqual(["Sandboxes", "my-box", "Audit log"]);
   });
 
   test("names the snapshot tab and pages", () => {

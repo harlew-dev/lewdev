@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  AuditPage,
   CallOptions,
   CreateOptions,
   CreateSessionOptions,
   CreateSnapshotOptions,
+  CustomDomain,
+  CustomDomainDNSRecords,
   ExposePortOptions,
   ExposeResult,
   HealthStatus,
+  IngressTarget,
   Lifecycle,
   ListOptions,
   ListSnapshotsOptions,
@@ -29,6 +33,9 @@ import {
   type SdkSandbox,
   type SnapshotInfo,
 } from "../src/index.js";
+
+type SdkNetworkUsage = Awaited<ReturnType<SdkSandbox["getNetworkUsage"]>>;
+type SdkNetworkLimits = Parameters<SdkSandbox["setNetworkLimits"]>[0];
 
 interface Call {
   method: string;
@@ -58,6 +65,10 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
     | "copyFile"
     | "searchFiles"
     | "findInFiles"
+    | "customDomains"
+    | "getNetworkUsage"
+    | "setNetworkLimits"
+    | "audit"
   > = {
     id: "sb-0123456789abcdef",
     image: "ubuntu:24.04",
@@ -122,6 +133,35 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
     copyFile: async () => {},
     searchFiles: async () => [],
     findInFiles: async () => [],
+    customDomains: {
+      add: async () => [],
+      remove: async () => {},
+      list: async () => [],
+      dns: async () => ({ records: [], target: { source: "unknown", ips: [] } }),
+    },
+    getNetworkUsage: async () => networkUsage(),
+    setNetworkLimits: async () => networkUsage(),
+    audit: async () => auditPage(),
+    ...overrides,
+  };
+}
+
+function networkUsage(overrides: Partial<SdkNetworkUsage> = {}): SdkNetworkUsage {
+  return {
+    sandboxID: "sb-0123456789abcdef",
+    bytesIn: 0,
+    bytesOut: 0,
+    bytesInLimit: 0,
+    bytesOutLimit: 0,
+    quotaExceeded: false,
+    ...overrides,
+  };
+}
+
+function auditPage(overrides: Partial<AuditPage> = {}): AuditPage {
+  return {
+    events: [],
+    coverage: { answered: [], missing: [], partial: false },
     ...overrides,
   };
 }
@@ -184,6 +224,14 @@ function fakeSdk(
       sessionID: string,
       attachOptions?: SessionAttachOptions,
     ) => SessionAttachHandle;
+    listCustomDomains?: () => CustomDomain[];
+    addCustomDomain?: (hostname: string, addOptions?: { port?: number }) => CustomDomain[];
+    removeCustomDomain?: (hostname: string) => void;
+    customDomainDNS?: () => CustomDomainDNSRecords;
+    getNetworkUsage?: () => SdkNetworkUsage;
+    setNetworkLimits?: (limitOptions: SdkNetworkLimits) => SdkNetworkUsage;
+    audit?: (id: string, auditOptions?: unknown) => AuditPage;
+    ingressDNS?: () => IngressTarget;
   } = {},
 ): { sdk: AerolSdk; calls: Call[] } {
   const calls: Call[] = [];
@@ -199,7 +247,42 @@ function fakeSdk(
     },
     get: async (id: string): Promise<SdkSandbox> => {
       calls.push({ method: "get", args: [id] });
-      return options.get?.() ?? sandbox({ id });
+      const base = options.get?.() ?? sandbox({ id });
+      return {
+        ...base,
+        customDomains: {
+          add: async (hostname: string, addOptions?: { port?: number }) => {
+            calls.push({ method: "addCustomDomain", args: [id, hostname, addOptions] });
+            return options.addCustomDomain?.(hostname, addOptions) ?? [];
+          },
+          remove: async (hostname: string) => {
+            calls.push({ method: "removeCustomDomain", args: [id, hostname] });
+            options.removeCustomDomain?.(hostname);
+          },
+          list: async () => {
+            calls.push({ method: "listCustomDomains", args: [id] });
+            return options.listCustomDomains?.() ?? [];
+          },
+          dns: async () => {
+            calls.push({ method: "customDomainDNS", args: [id] });
+            return (
+              options.customDomainDNS?.() ?? { records: [], target: { source: "unknown", ips: [] } }
+            );
+          },
+        },
+        getNetworkUsage: async () => {
+          calls.push({ method: "getNetworkUsage", args: [id] });
+          return options.getNetworkUsage?.() ?? networkUsage({ sandboxID: id });
+        },
+        setNetworkLimits: async (limitOptions: SdkNetworkLimits) => {
+          calls.push({ method: "setNetworkLimits", args: [id, limitOptions] });
+          return options.setNetworkLimits?.(limitOptions) ?? networkUsage({ sandboxID: id });
+        },
+        audit: async (auditOptions?: unknown) => {
+          calls.push({ method: "audit", args: [id, auditOptions] });
+          return options.audit?.(id, auditOptions) ?? auditPage();
+        },
+      };
     },
     start: async (id: string): Promise<SdkSandbox> => {
       calls.push({ method: "start", args: [id] });
@@ -232,6 +315,12 @@ function fakeSdk(
           version: "0.8.3",
         }
       );
+    },
+    dns: {
+      target: async (): Promise<IngressTarget> => {
+        calls.push({ method: "dnsTarget", args: [] });
+        return options.ingressDNS?.() ?? { source: "unknown" };
+      },
     },
     createSession: async (id: string, sessionOptions: CreateSessionOptions): Promise<Session> => {
       calls.push({ method: "createSession", args: [id, sessionOptions] });
@@ -1229,5 +1318,314 @@ describe("LewdevApi account limits", () => {
       usage: { sandboxes: 3, cpu: 3, memoryMB: 3072 },
     });
     expect(calls[0]).toEqual({ method: "getTeamQuota", args: ["acme"] });
+  });
+});
+
+function customDomain(overrides: Partial<CustomDomain> = {}): CustomDomain {
+  return {
+    hostname: "api.example.com",
+    status: "pending_dns",
+    createdAt,
+    updatedAt: createdAt,
+    ...overrides,
+  };
+}
+
+describe("LewdevApi custom domains", () => {
+  test("lists domains with status, error and target port", async () => {
+    const { sdk, calls } = fakeSdk({
+      listCustomDomains: () => [
+        customDomain({ targetPort: 8080 }),
+        customDomain({ hostname: "www.example.com", status: "failed", lastError: "ACME failed" }),
+      ],
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.listCustomDomains("sb-abc")).toEqual([
+      {
+        hostname: "api.example.com",
+        status: "pending_dns",
+        createdAt,
+        updatedAt: createdAt,
+        targetPort: 8080,
+      },
+      {
+        hostname: "www.example.com",
+        status: "failed",
+        lastError: "ACME failed",
+        createdAt,
+        updatedAt: createdAt,
+      },
+    ]);
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "listCustomDomains", args: ["sb-abc"] },
+    ]);
+  });
+
+  test("adds a trimmed hostname with and without a port", async () => {
+    const { sdk, calls } = fakeSdk({
+      addCustomDomain: (hostname, addOptions) => [
+        customDomain({ hostname, targetPort: addOptions?.port }),
+      ],
+    });
+    const api = new LewdevApi(sdk);
+
+    const withPort = await api.addCustomDomain("sb-abc", "  api.example.com ", { port: 8080 });
+    const withoutPort = await api.addCustomDomain("sb-abc", "www.example.com");
+
+    expect(withPort).toEqual([
+      {
+        hostname: "api.example.com",
+        status: "pending_dns",
+        createdAt,
+        updatedAt: createdAt,
+        targetPort: 8080,
+      },
+    ]);
+    expect(withoutPort[0]?.targetPort).toBeUndefined();
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "addCustomDomain", args: ["sb-abc", "api.example.com", { port: 8080 }] },
+      { method: "get", args: ["sb-abc"] },
+      { method: "addCustomDomain", args: ["sb-abc", "www.example.com", undefined] },
+    ]);
+  });
+
+  test("rejects an empty hostname or invalid port before calling the server", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await expect(api.addCustomDomain("sb-abc", "   ")).rejects.toThrow("Hostname is required.");
+    await expect(api.addCustomDomain("sb-abc", "api.example.com", { port: 0 })).rejects.toThrow(
+      "Port must be an integer from 1 to 65535",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("removes a trimmed hostname", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.removeCustomDomain("sb-abc", " api.example.com ");
+
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "removeCustomDomain", args: ["sb-abc", "api.example.com"] },
+    ]);
+  });
+
+  test("maps the DNS records and ingress target", async () => {
+    const { sdk, calls } = fakeSdk({
+      customDomainDNS: () => ({
+        records: [
+          {
+            hostname: "api.example.com",
+            type: "CNAME",
+            name: "api",
+            value: "ingress.example.net",
+            notes: "DNS only",
+          },
+        ],
+        target: { hostname: "ingress.example.net", source: "hostname" },
+      }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.customDomainDNS("sb-abc")).toEqual({
+      records: [
+        {
+          hostname: "api.example.com",
+          type: "CNAME",
+          name: "api",
+          value: "ingress.example.net",
+          notes: "DNS only",
+        },
+      ],
+      target: { hostname: "ingress.example.net", ips: [], source: "hostname" },
+    });
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "customDomainDNS", args: ["sb-abc"] },
+    ]);
+  });
+
+  test("maps the cluster ingress target", async () => {
+    const { sdk, calls } = fakeSdk({
+      ingressDNS: () => ({ hostname: "ingress.example.net", source: "hostname" }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.getIngressTarget()).toEqual({
+      hostname: "ingress.example.net",
+      ips: [],
+      source: "hostname",
+    });
+    expect(calls).toEqual([{ method: "dnsTarget", args: [] }]);
+  });
+});
+
+describe("LewdevApi network usage", () => {
+  test("maps counters, limits and the optional sample times", async () => {
+    const { sdk, calls } = fakeSdk({
+      getNetworkUsage: () =>
+        networkUsage({
+          sandboxID: "sb-abc",
+          bytesIn: 1024,
+          bytesOut: 2048,
+          bytesInLimit: 4096,
+          quotaExceeded: true,
+          quotaExceededAt: "2026-11-27T10:00:00Z",
+          lastSampledAt: "2026-11-27T10:01:00Z",
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.getNetworkUsage("sb-abc")).toEqual({
+      bytesIn: 1024,
+      bytesOut: 2048,
+      bytesInLimit: 4096,
+      bytesOutLimit: 0,
+      quotaExceeded: true,
+      quotaExceededAt: "2026-11-27T10:00:00Z",
+      lastSampledAt: "2026-11-27T10:01:00Z",
+    });
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "getNetworkUsage", args: ["sb-abc"] },
+    ]);
+  });
+
+  test("sets both limits with the SDK's field names", async () => {
+    const { sdk, calls } = fakeSdk({
+      setNetworkLimits: (limitOptions) =>
+        networkUsage({
+          bytesInLimit: limitOptions.networkBytesInLimit ?? 0,
+          bytesOutLimit: limitOptions.networkBytesOutLimit ?? 0,
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.setNetworkLimits("sb-abc", { bytesInLimit: 1024, bytesOutLimit: 0 })).toEqual({
+      bytesIn: 0,
+      bytesOut: 0,
+      bytesInLimit: 1024,
+      bytesOutLimit: 0,
+      quotaExceeded: false,
+    });
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      {
+        method: "setNetworkLimits",
+        args: ["sb-abc", { networkBytesInLimit: 1024, networkBytesOutLimit: 0 }],
+      },
+    ]);
+  });
+
+  test("leaves omitted limits out of the request", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.setNetworkLimits("sb-abc", { bytesOutLimit: 2048 });
+
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "setNetworkLimits", args: ["sb-abc", { networkBytesOutLimit: 2048 }] },
+    ]);
+  });
+
+  test("rejects negative and fractional limits before calling the server", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await expect(api.setNetworkLimits("sb-abc", { bytesInLimit: -1 })).rejects.toThrow(
+      "Inbound limit must be a whole number of bytes",
+    );
+    await expect(api.setNetworkLimits("sb-abc", { bytesOutLimit: 1.5 })).rejects.toThrow(
+      "Outbound limit must be a whole number of bytes",
+    );
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("LewdevApi audit log", () => {
+  test("maps events, coverage, gaps and the next cursor", async () => {
+    const { sdk, calls } = fakeSdk({
+      audit: () =>
+        auditPage({
+          events: [
+            {
+              time: "2026-11-27T10:00:00Z",
+              kind: "egress",
+              result: "failure",
+              reason: "host_not_allowed",
+              destination: "example.com:443",
+              network: "tcp",
+              actor: "system:lifecycle",
+              ref: "ref-1",
+              eventID: "evt-1",
+              incarnationID: "inc-1",
+            },
+            { time: "2026-11-27T10:01:00Z", result: "success", dropped: 2 },
+          ],
+          coverage: { answered: ["node-a"], missing: ["node-b"], partial: true },
+          nextCursor: "cursor-2",
+        }),
+    });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.getAuditLog("sb-abc")).toEqual({
+      events: [
+        {
+          time: "2026-11-27T10:00:00Z",
+          kind: "egress",
+          result: "failure",
+          reason: "host_not_allowed",
+          destination: "example.com:443",
+          network: "tcp",
+          actor: "system:lifecycle",
+          ref: "ref-1",
+          eventID: "evt-1",
+          incarnationID: "inc-1",
+        },
+        { time: "2026-11-27T10:01:00Z", result: "success", dropped: 2 },
+      ],
+      coverage: { answered: ["node-a"], missing: ["node-b"], partial: true },
+      nextCursor: "cursor-2",
+    });
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      { method: "audit", args: ["sb-abc", {}] },
+    ]);
+  });
+
+  test("forwards kind, limit, cursor, incarnation and caller filters", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.getAuditLog("sb-abc", {
+      kind: "egress",
+      limit: 50,
+      cursor: "cursor-2",
+      incarnationID: "inc-1",
+      caller: "system:*",
+    });
+
+    expect(calls).toEqual([
+      { method: "get", args: ["sb-abc"] },
+      {
+        method: "audit",
+        args: [
+          "sb-abc",
+          {
+            kind: "egress",
+            limit: 50,
+            cursor: "cursor-2",
+            incarnationID: "inc-1",
+            caller: "system:*",
+          },
+        ],
+      },
+    ]);
   });
 });

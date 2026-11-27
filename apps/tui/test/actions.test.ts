@@ -6,14 +6,20 @@ import {
   actionIndex,
   actionKey,
   buildAddSshKeyActions,
+  buildAddCustomDomainActions,
+  buildAuditLogActions,
   buildConnectActions,
+  buildCustomDomainsPageActions,
   buildDeleteActions,
   buildDisableSshActions,
   buildForgetHostActions,
   buildKillSessionActions,
+  buildNetworkLimitsActions,
+  buildNetworkUsageActions,
   buildNewSandboxActions,
   buildOpenPortActions,
   buildPortsPageActions,
+  buildRemoveCustomDomainActions,
   buildRemoveSshKeyActions,
   buildResetSshActions,
   buildSandboxListActions,
@@ -64,8 +70,11 @@ describe("sandbox page actions", () => {
       "copy-ssh",
       "ssh-info",
       "ports",
+      "custom-domains",
       "browse-files",
       "create-snapshot",
+      "network-usage",
+      "audit-log",
       "back",
     ]);
     expect(actions.find((entry) => entry.id === "ssh")?.label).toBe("Open terminal");
@@ -84,8 +93,11 @@ describe("sandbox page actions", () => {
       "copy-ssh": undefined,
       "ssh-info": undefined,
       ports: undefined,
+      "custom-domains": undefined,
       "browse-files": undefined,
       "create-snapshot": undefined,
+      "network-usage": undefined,
+      "audit-log": undefined,
       back: "esc",
     });
     expect(actions.find((entry) => entry.id === "quit")).toBeUndefined();
@@ -150,6 +162,14 @@ describe("sandbox page actions", () => {
     expect(actions.find((entry) => entry.id === "ssh-info")?.enabled).toBe(true);
   });
 
+  test("keeps custom domains and activity pages available while stopped", () => {
+    const actions = buildSandboxPageActions({ ...started, status: "stopped" });
+
+    for (const id of ["custom-domains", "network-usage", "audit-log"] as const) {
+      expect(actions.find((entry) => entry.id === id)?.enabled).toBe(true);
+    }
+  });
+
   test("disables terminal actions on sandboxes without a shell", () => {
     const actions = buildSandboxPageActions({ ...started, hasShell: false });
     for (const id of ["ssh", "sessions"] as const) {
@@ -196,8 +216,11 @@ describe("sandbox page actions", () => {
       "open-vscode",
       "copy-ssh",
       "ports",
+      "custom-domains",
       "browse-files",
       "create-snapshot",
+      "network-usage",
+      "audit-log",
       "start",
       "stop",
       "restart",
@@ -261,15 +284,17 @@ describe("sandbox page groups", () => {
       "Ports",
       "Files",
       "Snapshots",
+      "Activity",
       undefined,
     ]);
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
       ["start", "stop", "restart", "resize", "lifecycle", "delete"],
       ["ssh", "sessions"],
       ["open-vscode", "copy-ssh", "ssh-info"],
-      ["ports"],
+      ["ports", "custom-domains"],
       ["browse-files"],
       ["create-snapshot"],
+      ["network-usage", "audit-log"],
       ["back"],
     ]);
     expect(groups[3]?.ports).toEqual([
@@ -806,5 +831,98 @@ describe("sessions page actions", () => {
     const confirm = buildKillSessionActions();
     expect(confirm.map((entry) => entry.id)).toEqual(["confirm-kill-session", "back"]);
     expect(confirm.find((entry) => entry.id === "confirm-kill-session")?.tone).toBe("error");
+  });
+});
+
+describe("custom domain and activity pages", () => {
+  function assertUsableKeys(actions: PageAction[]): void {
+    const keys = actions
+      .map((entry) => entry.key)
+      .filter((key): key is string => key !== undefined);
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const reserved of ["j", "k"]) {
+      expect(keys).not.toContain(reserved);
+    }
+  }
+
+  test("binds add and remove on the custom domains list", () => {
+    const actions = buildCustomDomainsPageActions({
+      hasDomains: true,
+      hasSelectedDomain: true,
+    });
+
+    expect(actions.map((entry) => entry.id)).toEqual([
+      "add-custom-domain",
+      "remove-custom-domain",
+      "back",
+    ]);
+    expect(shortcuts(actions)).toEqual({
+      "add-custom-domain": "a",
+      "remove-custom-domain": "x",
+      back: "esc",
+    });
+    expect(actions.find((entry) => entry.id === "remove-custom-domain")?.tone).toBe("error");
+    assertUsableKeys(actions);
+  });
+
+  test("explains why there is nothing to remove", () => {
+    expect(
+      buildCustomDomainsPageActions({ hasDomains: false, hasSelectedDomain: false }).find(
+        (entry) => entry.id === "remove-custom-domain",
+      )?.unavailableReason,
+    ).toBe("There are no custom domains to remove.");
+    expect(
+      buildCustomDomainsPageActions({ hasDomains: true, hasSelectedDomain: false }).find(
+        (entry) => entry.id === "remove-custom-domain",
+      )?.unavailableReason,
+    ).toBe("Select a domain first.");
+  });
+
+  test("adds a domain then offers only Done with the DNS records on screen", () => {
+    const form = buildAddCustomDomainActions({ added: false });
+    expect(form.map((entry) => entry.id)).toEqual(["submit", "paste", "back"]);
+    expect(form.find((entry) => entry.id === "submit")?.key).toBe("enter");
+    assertUsableKeys(form);
+
+    const added = buildAddCustomDomainActions({ added: true });
+    expect(added.map((entry) => entry.id)).toEqual(["back"]);
+    expect(added[0]?.label).toBe("Done");
+    expect(added[0]?.key).toBe("esc");
+  });
+
+  test("confirms a domain removal naming the hostname on its page", () => {
+    const actions = buildRemoveCustomDomainActions();
+    expect(actions.map((entry) => entry.id)).toEqual(["confirm-remove-custom-domain", "back"]);
+    expect(actions[0]?.tone).toBe("error");
+    assertUsableKeys(actions);
+  });
+
+  test("sets network limits only once usage has loaded", () => {
+    const loading = buildNetworkUsageActions({ hasUsage: false });
+    expect(loading.find((entry) => entry.id === "network-limits")?.unavailableReason).toBe(
+      "Network usage has not loaded yet.",
+    );
+    expect(loading.find((entry) => entry.id === "network-limits")?.key).toBe("s");
+    assertUsableKeys(loading);
+    expect(buildNetworkLimitsActions().map((entry) => entry.id)).toEqual([
+      "submit",
+      "paste",
+      "back",
+    ]);
+  });
+
+  test("uses f to filter and m to load more audit events", () => {
+    const actions = buildAuditLogActions({ hasMore: true });
+    expect(actions.map((entry) => entry.id)).toEqual(["filter-audit", "load-more-audit", "back"]);
+    expect(shortcuts(actions)).toEqual({
+      "filter-audit": "f",
+      "load-more-audit": "m",
+      back: "esc",
+    });
+    assertUsableKeys(actions);
+    expect(
+      buildAuditLogActions({ hasMore: false }).find((entry) => entry.id === "load-more-audit")
+        ?.unavailableReason,
+    ).toBe("There are no more events to load.");
   });
 });

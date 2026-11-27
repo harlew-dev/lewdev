@@ -27,6 +27,12 @@ export type Page =
   | ({ kind: "vscode-directory" } & SandboxPageTarget)
   | ({ kind: "ports" } & SandboxPageTarget)
   | ({ kind: "open-port" } & SandboxPageTarget)
+  | ({ kind: "custom-domains" } & SandboxPageTarget)
+  | ({ kind: "add-custom-domain" } & SandboxPageTarget)
+  | ({ kind: "remove-custom-domain"; hostname: string } & SandboxPageTarget)
+  | ({ kind: "network-usage" } & SandboxPageTarget)
+  | ({ kind: "network-limits" } & SandboxPageTarget)
+  | ({ kind: "audit-log" } & SandboxPageTarget)
   | ({ kind: "files" } & SandboxPageTarget)
   | ({ kind: "delete-sandbox" } & SandboxPageTarget)
   | ({ kind: "trust-hosts" } & SandboxPageTarget)
@@ -67,6 +73,12 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   "vscode-directory": "Select directory",
   ports: "Ports",
   "open-port": "Open port",
+  "custom-domains": "Custom domains",
+  "add-custom-domain": "Add domain",
+  "remove-custom-domain": "Remove domain",
+  "network-usage": "Network usage",
+  "network-limits": "Network limits",
+  "audit-log": "Audit log",
   files: "Files",
   "delete-sandbox": "Delete sandbox",
   "trust-hosts": "Trust host keys",

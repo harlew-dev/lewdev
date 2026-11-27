@@ -40,9 +40,50 @@ export function isSandboxCommand(value: string | undefined): value is SandboxCom
  * Runs one scriptable sandbox subcommand and returns the process exit code.
  * Usage and server errors are printed to stderr; stdout stays data-only.
  */
+/**
+ * Pulls `--profile <name>` or `--profile=<name>` out of the arguments. Anything
+ * after `--` belongs to the remote command and is left alone.
+ */
+export function extractProfileFlag(args: readonly string[]): {
+  args: string[];
+  profile?: string;
+} {
+  const rest: string[] = [];
+  let profile: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    if (arg === "--") {
+      rest.push(...args.slice(index));
+      break;
+    }
+    if (arg === "--profile") {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        throw new Error("--profile needs a profile name.");
+      }
+      profile = value;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--profile=")) {
+      profile = arg.slice("--profile=".length);
+      if (!profile) {
+        throw new Error("--profile needs a profile name.");
+      }
+      continue;
+    }
+    rest.push(arg);
+  }
+  return profile === undefined ? { args: rest } : { args: rest, profile };
+}
+
+let selectedProfile: string | undefined;
+
 export async function runSandboxCli(args: string[], io: CliOutput = defaultIo): Promise<number> {
   try {
-    return await dispatch(args, io);
+    const parsed = extractProfileFlag(args);
+    selectedProfile = parsed.profile;
+    return await dispatch(parsed.args, io);
   } catch (error) {
     io.stderr.write(`${describeError(error)}\n`);
     return 1;
@@ -79,7 +120,10 @@ interface CliContext {
 }
 
 async function requireApi(io: CliOutput): Promise<CliContext | null> {
-  const loaded = await loadConfig();
+  const loaded = await loadConfig(
+    process.env,
+    selectedProfile === undefined ? {} : { profile: selectedProfile },
+  );
   if (!loaded.config) {
     io.stderr.write(`${NOT_CONFIGURED}\n`);
     return null;

@@ -1,10 +1,23 @@
 export type {
   AccountInfo,
+  AddCustomDomainInput,
   AerolSdk,
+  AuditCoverageInfo,
+  AuditEventInfo,
+  AuditPageInfo,
+  AuditQuery,
   CreatedSandbox,
   CreateSandboxInput,
   CreateSnapshotInput,
+  CustomDomainDNSInfo,
+  CustomDomainInfo,
+  CustomDomainStatus,
+  DnsRecordInfo,
+  DnsRecordType,
   ExposedPortInfo,
+  IngressTargetInfo,
+  IngressTargetSource,
+  NetworkUsageInfo,
   PortVisibility,
   RegisterSnapshotInput,
   ResizeSandboxInput,
@@ -28,6 +41,7 @@ export type {
   SandboxUploadData,
   SandboxUploadOptions,
   SdkSandbox,
+  SetNetworkLimitsInput,
   SnapshotInfo,
   TeamQuotaInfo,
   CreateTerminalSessionInput,
@@ -41,14 +55,26 @@ export {
   RESERVED_SNAPSHOT_PREFIX,
   validateSnapshotName,
 } from "./client.js";
-export type { ConfigSource, LewdevConfig, LoadedConfig } from "./config.js";
+export type {
+  ConfigSource,
+  LewdevConfig,
+  LoadedConfig,
+  ProfileOptions,
+  ProfileSummary,
+  SaveConfigOptions,
+} from "./config.js";
 export {
   ConfigError,
+  DEFAULT_PROFILE,
+  deleteProfile,
   getConfigDir,
   getConfigPath,
+  listProfiles,
   loadConfig,
   normalizeApiUrl,
+  normalizeProfileName,
   saveConfig,
+  setActiveProfile,
 } from "./config.js";
 export { describeError, describeFileError, isFileAccessUnsupportedError } from "./errors.js";
 export type {
@@ -71,7 +97,12 @@ export {
   uploadFolderFromPath,
 } from "./file-transfer.js";
 export type { CliOutput, SandboxCommand } from "./cli.js";
-export { formatSandboxTable, isSandboxCommand, runSandboxCli } from "./cli.js";
+export {
+  extractProfileFlag,
+  formatSandboxTable,
+  isSandboxCommand,
+  runSandboxCli,
+} from "./cli.js";
 export { resolveSandbox, SandboxResolutionError } from "./sandbox-resolve.js";
 export type { VscodeLaunch } from "./vscode.js";
 export { openInVscode, vscodeLaunchCommand } from "./vscode.js";

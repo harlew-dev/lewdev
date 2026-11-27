@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type { ExposedPortInfo, LewdevApi } from "./client.js";
-import { getConfigDir } from "./config.js";
+import { getConfigDir, normalizeProfileName } from "./config.js";
 import { getKeysDir, sanitizeSandboxId } from "./keys.js";
 import { ensurePrivateDir } from "./private-dir.js";
 import { ensureKnownHostsFile, getKnownHostsPath, knownHostsEntry } from "./ssh.js";
@@ -61,6 +61,8 @@ export interface DirectSshSetupOptions {
   mode?: DirectSshMode;
   /** The lewdev executable/entry used by SSH's ProxyCommand. */
   proxyCommand?: string;
+  /** The profile the sandbox belongs to; recorded in the ProxyCommand. */
+  profile?: string;
   /** Called before and after every step so the UI can show progress. */
   onProgress?: (progress: DirectSshProgress) => void;
 }
@@ -155,8 +157,19 @@ export function getLewdevCommand(options: LewdevCommandOptions = {}): string {
   return `${quoteCommandPath(execPath)} ${quoteCommandPath(resolve(main))}`;
 }
 
-export function getSshProxyCommand(sandboxId: string, options: LewdevCommandOptions = {}): string {
-  return `${getLewdevCommand(options)} ssh-proxy ${sanitizeSandboxId(sandboxId)}`;
+/**
+ * The ProxyCommand for a private block. It names the profile the sandbox
+ * belongs to, so switching profiles later does not point SSH at another
+ * server. Blocks written before profiles have no `--profile` and use the
+ * default profile.
+ */
+export function getSshProxyCommand(
+  sandboxId: string,
+  options: LewdevCommandOptions & { profile?: string } = {},
+): string {
+  const profile =
+    options.profile === undefined ? "" : ` --profile ${normalizeProfileName(options.profile)}`;
+  return `${getLewdevCommand(options)} ssh-proxy${profile} ${sanitizeSandboxId(sandboxId)}`;
 }
 
 /** Known_hosts name for a block: the alias in private mode, host:port in public. */
@@ -1029,7 +1042,13 @@ export async function setupDirectSsh(
     return { value: undefined, message: `Saved ${keys.length} host key(s) to ${basename(path)}.` };
   });
   const proxyCommand =
-    mode === "private" ? (options.proxyCommand ?? getSshProxyCommand(sandboxId)) : undefined;
+    mode === "private"
+      ? (options.proxyCommand ??
+        getSshProxyCommand(
+          sandboxId,
+          options.profile === undefined ? {} : { profile: options.profile },
+        ))
+      : undefined;
   const sshConfigPath = await run("config", async () => {
     const path = await writeDirectSshConfigBlock(
       {
@@ -1105,6 +1124,8 @@ export async function disableDirectSsh(
 export interface DirectSshSwitchOptions {
   env?: Env;
   proxyCommand?: string;
+  /** The profile the sandbox belongs to; recorded in the ProxyCommand. */
+  profile?: string;
 }
 
 /** Switches a configured sandbox to public TCP SSH, starting sshd and exposing port 22. */
@@ -1171,7 +1192,12 @@ export async function switchToPrivateSsh(
     mode: "private",
     keyPath: key.privateKeyPath,
     knownHostsPath: getKnownHostsPath(env),
-    proxyCommand: options.proxyCommand ?? getSshProxyCommand(sandboxId),
+    proxyCommand:
+      options.proxyCommand ??
+      getSshProxyCommand(
+        sandboxId,
+        options.profile === undefined ? {} : { profile: options.profile },
+      ),
     hostKeyAlias: alias,
   };
   await writeDirectSshConfigBlock(block, env);

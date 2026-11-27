@@ -45,6 +45,15 @@ export type ActionId =
   | "connect"
   | "open-port"
   | "close-port"
+  | "custom-domains"
+  | "add-custom-domain"
+  | "remove-custom-domain"
+  | "confirm-remove-custom-domain"
+  | "network-usage"
+  | "network-limits"
+  | "audit-log"
+  | "filter-audit"
+  | "load-more-audit"
   | "copy-ssh"
   | "trust-hosts"
   | "confirm-trust-hosts"
@@ -120,6 +129,9 @@ interface SandboxReasons {
   restart?: string;
   manage?: string;
   addKey?: string;
+  domains?: string;
+  network?: string;
+  audit?: string;
 }
 
 /**
@@ -190,6 +202,9 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
     stop: stopReason,
     restart: restartReason,
     manage: blocked,
+    domains: blocked,
+    network: blocked,
+    audit: blocked,
   };
 }
 
@@ -483,6 +498,14 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       reasons.ports,
     ),
     action(
+      "custom-domains",
+      "Custom domains",
+      "domains",
+      undefined,
+      "Bind a custom hostname, see the DNS records to create, and check its certificate.",
+      reasons.domains,
+    ),
+    action(
       "browse-files",
       "Browse files",
       "files",
@@ -497,6 +520,22 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       undefined,
       "Save the sandbox's disk as a reusable snapshot.",
       reasons.snapshot,
+    ),
+    action(
+      "network-usage",
+      "Network usage",
+      "usage",
+      undefined,
+      "Show bytes in and out, traffic limits and whether the quota is exceeded.",
+      reasons.network,
+    ),
+    action(
+      "audit-log",
+      "Audit log",
+      "audit",
+      undefined,
+      "Read outbound connections, egress denials and secret access.",
+      reasons.audit,
     ),
     action("back", "Back", "back", "esc", "Return to the sandbox list.", undefined),
   ];
@@ -536,10 +575,11 @@ export function buildSandboxPageGroups(
     {
       title: "Ports",
       ...(portRows.length > 0 ? { ports: portRows } : { note: "No ports open" }),
-      actions: collect(["ports"]),
+      actions: collect(["ports", "custom-domains"]),
     },
     { title: "Files", actions: collect(["browse-files"]) },
     { title: "Snapshots", actions: collect(["create-snapshot"]) },
+    { title: "Activity", actions: collect(["network-usage", "audit-log"]) },
     { actions: collect(["back"]) },
   ];
 }
@@ -973,6 +1013,142 @@ export function buildOpenPortActions(): PageAction[] {
       undefined,
     ),
     action("back", "Cancel", "cancel", "esc", "Return to the ports list.", undefined),
+  ];
+}
+
+/** Actions on the custom domains list; x removes the selected domain. */
+export function buildCustomDomainsPageActions(context: {
+  hasDomains: boolean;
+  hasSelectedDomain: boolean;
+  /** Set when the server has custom domains switched off. */
+  unavailableReason?: string;
+}): PageAction[] {
+  return [
+    action(
+      "add-custom-domain",
+      "Add domain",
+      "add",
+      "a",
+      "Bind a hostname and show the DNS records to create.",
+      context.unavailableReason,
+    ),
+    action(
+      "remove-custom-domain",
+      "Remove domain",
+      "remove",
+      "x",
+      "Remove the selected hostname and its certificate binding.",
+      context.hasSelectedDomain
+        ? undefined
+        : context.hasDomains
+          ? "Select a domain first."
+          : "There are no custom domains to remove.",
+      "error",
+    ),
+    action("back", "Back", "back", "esc", "Return to the sandbox page.", undefined),
+  ];
+}
+
+/** Actions on the Add custom domain form; after adding, only Done remains. */
+export function buildAddCustomDomainActions(context: { added: boolean }): PageAction[] {
+  if (context.added) {
+    return [action("back", "Done", "done", "esc", "Return to the custom domains list.", undefined)];
+  }
+  return [
+    action(
+      "submit",
+      "Add domain",
+      "add",
+      "enter",
+      "Bind the hostname and show the DNS records to create.",
+      undefined,
+    ),
+    action(
+      "paste",
+      "Paste from clipboard",
+      "paste",
+      "ctrl+v",
+      "Paste into the focused field.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to the custom domains list.", undefined),
+  ];
+}
+
+/** Actions on the remove-custom-domain confirmation page. */
+export function buildRemoveCustomDomainActions(): PageAction[] {
+  return [
+    action(
+      "confirm-remove-custom-domain",
+      "Remove domain",
+      "remove",
+      undefined,
+      "Unbind the hostname and drop its certificate; this cannot be undone.",
+      undefined,
+      "error",
+    ),
+    action("back", "Cancel", "cancel", "esc", "Keep the custom domain.", undefined),
+  ];
+}
+
+/** Actions on the network usage page. */
+export function buildNetworkUsageActions(context: { hasUsage: boolean }): PageAction[] {
+  return [
+    action(
+      "network-limits",
+      "Set limits",
+      "set limits",
+      "s",
+      "Cap inbound and outbound traffic, or remove the caps.",
+      context.hasUsage ? undefined : "Network usage has not loaded yet.",
+    ),
+    action("back", "Back", "back", "esc", "Return to the sandbox page.", undefined),
+  ];
+}
+
+/** Actions on the network limits form page. */
+export function buildNetworkLimitsActions(): PageAction[] {
+  return [
+    action(
+      "submit",
+      "Save limits",
+      "save",
+      "enter",
+      "Apply the inbound and outbound caps.",
+      undefined,
+    ),
+    action(
+      "paste",
+      "Paste from clipboard",
+      "paste",
+      "ctrl+v",
+      "Paste a number into the focused field.",
+      undefined,
+    ),
+    action("back", "Cancel", "cancel", "esc", "Return to network usage.", undefined),
+  ];
+}
+
+/** Actions on the read-only audit log page. */
+export function buildAuditLogActions(context: { hasMore: boolean }): PageAction[] {
+  return [
+    action(
+      "filter-audit",
+      "Filter by kind",
+      "filter",
+      "f",
+      "Show only one kind of audit event.",
+      undefined,
+    ),
+    action(
+      "load-more-audit",
+      "Load more",
+      "load more",
+      "m",
+      "Load the next page of audit events.",
+      context.hasMore ? undefined : "There are no more events to load.",
+    ),
+    action("back", "Back", "back", "esc", "Return to the sandbox page.", undefined),
   ];
 }
 

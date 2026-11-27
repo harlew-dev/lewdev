@@ -2,12 +2,15 @@
 import {
   checkForUpdate,
   cleanupPreviousBinary,
+  DEFAULT_PROFILE,
   describeError,
   downloadVerifiedUpdate,
+  extractProfileFlag,
   installUpdate,
   isSandboxCommand,
   isStandaloneBuild,
   LewdevApi,
+  listProfiles,
   loadConfig,
   runSandboxCli,
   runSshProxy,
@@ -25,7 +28,7 @@ const HELP = `lewdev ${VERSION} — a terminal client for AerolVM sandboxes
 
 Usage: lewdev [--help] [--version]
        lewdev update [--check]
-       lewdev ssh-proxy <sandbox-id>
+       lewdev ssh-proxy [--profile <name>] <sandbox-id>
        lewdev ls [--json]
        lewdev start <sandbox>
        lewdev stop <sandbox>
@@ -45,6 +48,7 @@ Environment overrides:
 
 Sandbox commands:
   <sandbox> is an exact sandbox ID, then an exact name. Ambiguous names fail.
+  --profile <name>       Use a saved profile instead of the active one (or LEWDEV_PROFILE)
   ls                     List sandboxes; --json prints lewdev's SandboxInfo array
   start / stop           Start or stop a sandbox
   delete                 Delete a sandbox and its local keys; asks unless --yes
@@ -152,14 +156,30 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "ssh-proxy") {
-    const sandboxId = args[1];
-    if (args.length !== 2 || !sandboxId) {
-      console.error("Usage: lewdev ssh-proxy <sandbox-id>");
+    let parsed: ReturnType<typeof extractProfileFlag>;
+    try {
+      parsed = extractProfileFlag(args.slice(1));
+    } catch (error) {
+      console.error(describeError(error));
+      process.exitCode = 1;
+      return;
+    }
+    const sandboxId = parsed.args[0];
+    if (parsed.args.length !== 1 || !sandboxId) {
+      console.error("Usage: lewdev ssh-proxy [--profile <name>] <sandbox-id>");
       process.exitCode = 1;
       return;
     }
     try {
-      const loaded = await loadConfig();
+      // Blocks written before profiles carry no --profile; they were set up
+      // against the server that became the default profile, so keep using it
+      // even after the user switches the active profile.
+      const profile =
+        parsed.profile ??
+        ((await listProfiles()).some((entry) => entry.name === DEFAULT_PROFILE)
+          ? DEFAULT_PROFILE
+          : undefined);
+      const loaded = await loadConfig(process.env, profile === undefined ? {} : { profile });
       if (!loaded.config) {
         console.error("lewdev is not configured. Run lewdev and connect to a server first.");
         process.exitCode = 1;
