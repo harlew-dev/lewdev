@@ -57,6 +57,7 @@ describe("page stack", () => {
     ).toEqual(myBox);
     expect(pageSandbox({ kind: "trust-hosts", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "files", ...myBox })).toEqual(myBox);
   });
 
   test("inserts the sandbox page below a sub-page opened from the list", () => {

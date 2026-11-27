@@ -47,6 +47,17 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
     | "uploadFile"
     | "listFiles"
     | "getFileInfo"
+    | "fileExists"
+    | "uploadFileStream"
+    | "uploadDir"
+    | "downloadFile"
+    | "downloadFileStream"
+    | "deleteFile"
+    | "makeDir"
+    | "moveFile"
+    | "copyFile"
+    | "searchFiles"
+    | "findInFiles"
   > = {
     id: "sb-0123456789abcdef",
     image: "ubuntu:24.04",
@@ -99,6 +110,18 @@ function sandbox(overrides: Partial<SdkSandbox> = {}): SdkSandbox {
       group: "root",
       modTime: createdAt,
     }),
+    fileExists: async () => false,
+    uploadFileStream: async () => {},
+    uploadDir: async () => {},
+    downloadFile: async () => new Uint8Array(),
+    downloadFileStream: async () =>
+      new Response(new Uint8Array()).body as ReadableStream<Uint8Array>,
+    deleteFile: async () => {},
+    makeDir: async () => {},
+    moveFile: async () => {},
+    copyFile: async () => {},
+    searchFiles: async () => [],
+    findInFiles: async () => [],
     ...overrides,
   };
 }
@@ -752,11 +775,96 @@ describe("LewdevApi", () => {
       path: "/root/link",
       isDir: false,
       symlinkTarget: "/root",
+      size: 0,
+      modTime: createdAt,
+      mode: "lrwxrwxrwx",
+      permissions: "0777",
+      owner: "root",
+      group: "root",
     });
     await expect(api.getFileInfo("sb-abc", "/root")).resolves.toMatchObject({
       name: "root",
       isDir: true,
     });
+  });
+
+  test("wraps the remaining file verbs with lewdev-owned options", async () => {
+    const calls: Call[] = [];
+    const stream = new Response(new Uint8Array([1, 2, 3])).body as ReadableStream<Uint8Array>;
+    const target = sandbox({
+      fileExists: async (path) => {
+        calls.push({ method: "fileExists", args: [path] });
+        return path === "/root/there";
+      },
+      uploadFileStream: async (path, data, options) => {
+        calls.push({ method: "uploadFileStream", args: [path, data, options] });
+      },
+      uploadDir: async (localDir, remoteDir) => {
+        calls.push({ method: "uploadDir", args: [localDir, remoteDir] });
+      },
+      deleteFile: async (path, options) => {
+        calls.push({ method: "deleteFile", args: [path, options] });
+      },
+      makeDir: async (path, options) => {
+        calls.push({ method: "makeDir", args: [path, options] });
+      },
+      moveFile: async (source, destination, options) => {
+        calls.push({ method: "moveFile", args: [source, destination, options] });
+      },
+      copyFile: async (source, destination, options) => {
+        calls.push({ method: "copyFile", args: [source, destination, options] });
+      },
+      searchFiles: async (path, pattern) => {
+        calls.push({ method: "searchFiles", args: [path, pattern] });
+        return ["/root/notes.txt"];
+      },
+      findInFiles: async (path, text) => {
+        calls.push({ method: "findInFiles", args: [path, text] });
+        return [{ file: "/root/notes.txt", line: 3, content: "hello" }];
+      },
+      downloadFileStream: async (path, options) => {
+        calls.push({ method: "downloadFileStream", args: [path, options] });
+        return stream;
+      },
+    });
+    const { sdk } = fakeSdk({ get: () => target });
+    const api = new LewdevApi(sdk);
+
+    await expect(api.fileExists("sb-abc", "/root/there")).resolves.toBe(true);
+    await expect(api.fileExists("sb-abc", "/root/missing")).resolves.toBe(false);
+    await api.uploadFileStream("sb-abc", "/root/a", stream);
+    await api.uploadDir("sb-abc", "/tmp/project", "/root/project");
+    await api.deleteFile("sb-abc", "/root/old", { recursive: true });
+    await api.makeDir("sb-abc", "/root/new", { parents: true, mode: 0o750 });
+    await api.moveFile("sb-abc", "/root/a", "/root/b", { overwrite: true });
+    await api.copyFile("sb-abc", "/root/a", "/root/c", { recursive: true });
+    await expect(api.searchFiles("sb-abc", "/root", "*.txt")).resolves.toEqual(["/root/notes.txt"]);
+    await expect(api.findInFiles("sb-abc", "/root", "hello")).resolves.toEqual([
+      { file: "/root/notes.txt", line: 3, content: "hello" },
+    ]);
+    await expect(api.downloadFileStream("sb-abc", "/root/a", { maxBytes: 10 })).resolves.toBe(
+      stream,
+    );
+
+    expect(calls.map((call) => call.method)).toEqual([
+      "fileExists",
+      "fileExists",
+      "uploadFileStream",
+      "uploadDir",
+      "deleteFile",
+      "makeDir",
+      "moveFile",
+      "copyFile",
+      "searchFiles",
+      "findInFiles",
+      "downloadFileStream",
+    ]);
+    expect(calls[2]?.args).toEqual(["/root/a", stream, {}]);
+    expect(calls[4]?.args).toEqual(["/root/old", { recursive: true }]);
+    expect(calls[5]?.args).toEqual(["/root/new", { parents: true, mode: 0o750 }]);
+    expect(calls[6]?.args).toEqual(["/root/a", "/root/b", { overwrite: true }]);
+    expect(calls[7]?.args).toEqual(["/root/a", "/root/c", { recursive: true }]);
+    expect(calls[10]?.args).toEqual(["/root/a", { maxBytes: 10 }]);
   });
 
   test("rejects invalid ports before calling the server", async () => {

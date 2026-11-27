@@ -27,6 +27,7 @@ export type Page =
   | ({ kind: "vscode-directory" } & SandboxPageTarget)
   | ({ kind: "ports" } & SandboxPageTarget)
   | ({ kind: "open-port" } & SandboxPageTarget)
+  | ({ kind: "files" } & SandboxPageTarget)
   | ({ kind: "delete-sandbox" } & SandboxPageTarget)
   | ({ kind: "trust-hosts" } & SandboxPageTarget)
   | ({ kind: "forget-host" } & SandboxPageTarget)
@@ -66,6 +67,7 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   "vscode-directory": "Select directory",
   ports: "Ports",
   "open-port": "Open port",
+  files: "Files",
   "delete-sandbox": "Delete sandbox",
   "trust-hosts": "Trust host keys",
   "forget-host": "Forget host key",

@@ -45,3 +45,19 @@ export function describeError(error: unknown): string {
 
   return String(error);
 }
+
+/** True when the sandbox runtime does not expose the file toolbox. */
+export function isFileAccessUnsupportedError(error: unknown): boolean {
+  return error instanceof MicroVMApiError && error.status === 501;
+}
+
+/**
+ * The file APIs answer 501 on runtimes without a toolbox, such as WASM and
+ * isolate sandboxes. Everything else keeps the normal error text.
+ */
+export function describeFileError(error: unknown): string {
+  if (isFileAccessUnsupportedError(error)) {
+    return "This sandbox's runtime doesn't support file access.";
+  }
+  return describeError(error);
+}

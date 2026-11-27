@@ -3,13 +3,18 @@ import {
   type CallOptions,
   type CreateOptions,
   type CreateSessionOptions,
+  type CopyFileOptions,
   type CreateSnapshotOptions,
+  type DeleteFileOptions,
   type ExecRequest,
   type ExecResult,
   type ExposePortOptions,
   type FileInfo,
   type FileList,
+  type FileMatch,
   type ListFilesOptions,
+  type MakeDirOptions,
+  type MoveFileOptions,
   type ExposeResult,
   type ExposeVisibility,
   type GetOptions,
@@ -184,12 +189,46 @@ export interface SdkSandbox {
   execStream(options: SdkExecStreamOptions): SdkExecStreamHandle;
   listFiles(path: string, options?: ListFilesOptions, call?: CallOptions): Promise<FileList>;
   getFileInfo(path: string, call?: CallOptions): Promise<FileInfo>;
+  fileExists(path: string, call?: CallOptions): Promise<boolean>;
   uploadFile(
     targetPath: string,
     data: BinaryLike,
     options?: UploadFileOptions,
     call?: CallOptions,
   ): Promise<void>;
+  uploadFileStream(
+    targetPath: string,
+    data: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>,
+    options?: UploadFileOptions,
+    call?: CallOptions,
+  ): Promise<void>;
+  uploadDir(localDir: string, remoteDir: string, call?: CallOptions): Promise<void>;
+  downloadFile(
+    targetPath: string,
+    options?: SandboxDownloadOptions,
+    call?: CallOptions,
+  ): Promise<Uint8Array>;
+  downloadFileStream(
+    targetPath: string,
+    options?: SandboxDownloadOptions,
+    call?: CallOptions,
+  ): Promise<ReadableStream<Uint8Array>>;
+  deleteFile(path: string, options?: DeleteFileOptions, call?: CallOptions): Promise<void>;
+  makeDir(path: string, options?: MakeDirOptions, call?: CallOptions): Promise<void>;
+  moveFile(
+    source: string,
+    destination: string,
+    options?: MoveFileOptions,
+    call?: CallOptions,
+  ): Promise<void>;
+  copyFile(
+    source: string,
+    destination: string,
+    options?: CopyFileOptions,
+    call?: CallOptions,
+  ): Promise<void>;
+  searchFiles(path: string, pattern: string, call?: CallOptions): Promise<string[]>;
+  findInFiles(path: string, text: string, call?: CallOptions): Promise<FileMatch[]>;
 }
 
 /** The subset of `MicroVM` that lewdev depends on. Tests inject a fake. */
@@ -307,6 +346,16 @@ export interface SandboxFileEntry {
   path: string;
   isDir: boolean;
   symlinkTarget?: string;
+  /** Bytes, when the server reports them. */
+  size?: number;
+  /** Last change time, RFC 3339 in UTC, when the server reports it. */
+  modTime?: string;
+  /** Type and permission string, such as `-rw-r--r--`. */
+  mode?: string;
+  /** Octal permission bits, such as `0644`. */
+  permissions?: string;
+  owner?: string;
+  group?: string;
 }
 
 export interface SandboxFileList {
@@ -315,6 +364,52 @@ export interface SandboxFileList {
 }
 
 export interface SandboxFileInfo extends SandboxFileEntry {}
+
+/** One line `findInFiles` found inside a sandbox file. */
+export interface SandboxFileMatch {
+  file: string;
+  line: number;
+  content: string;
+}
+
+/** How an upload writes its sandbox file. Every field is off by default. */
+export interface SandboxUploadOptions {
+  append?: boolean;
+  createOnly?: boolean;
+  atomic?: boolean;
+  mode?: number;
+}
+
+export interface SandboxDownloadOptions {
+  /** Refuse files larger than this many bytes. */
+  maxBytes?: number;
+}
+
+export interface SandboxDeleteOptions {
+  /** Delete a folder and everything in it. */
+  recursive?: boolean;
+}
+
+export interface SandboxMakeDirOptions {
+  /** Also make missing parent folders, and accept an existing folder. */
+  parents?: boolean;
+  mode?: number;
+}
+
+export interface SandboxMoveOptions {
+  /** Replace an existing destination. */
+  overwrite?: boolean;
+}
+
+export interface SandboxCopyOptions {
+  /** Replace an existing destination. */
+  overwrite?: boolean;
+  /** Copy a folder and everything in it. */
+  recursive?: boolean;
+}
+
+/** The upload source accepted by the SDK: a byte stream or an async iterable. */
+export type SandboxUploadData = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>;
 
 export interface CreatedSandbox {
   sandbox: SandboxInfo;
@@ -586,6 +681,29 @@ function validatePort(port: number): void {
   }
 }
 
+function toFileEntry(info: FileInfo): SandboxFileEntry {
+  return {
+    name: info.name,
+    path: info.path,
+    isDir: info.isDir,
+    ...(info.symlinkTarget === undefined ? {} : { symlinkTarget: info.symlinkTarget }),
+    ...(info.size === undefined ? {} : { size: info.size }),
+    ...(info.modTime === undefined ? {} : { modTime: info.modTime }),
+    ...(info.mode === undefined ? {} : { mode: info.mode }),
+    ...(info.permissions === undefined ? {} : { permissions: info.permissions }),
+    ...(info.owner === undefined ? {} : { owner: info.owner }),
+    ...(info.group === undefined ? {} : { group: info.group }),
+  };
+}
+
+function toFileMatch(match: FileMatch): SandboxFileMatch {
+  return {
+    file: match.file,
+    line: match.line,
+    content: match.content,
+  };
+}
+
 /**
  * A UI-free wrapper around the AerolVM SDK. Every network call goes through the
  * injected `AerolSdk`, which keeps the UI easy to test without a server.
@@ -838,36 +956,108 @@ export class LewdevApi {
     const sandbox = await this.sdk.get(id);
     const result = await sandbox.listFiles(path, options);
     return {
-      entries: result.entries.map((entry) => ({
-        name: entry.name,
-        path: entry.path,
-        isDir: entry.isDir,
-        ...(entry.symlinkTarget === undefined ? {} : { symlinkTarget: entry.symlinkTarget }),
-      })),
+      entries: result.entries.map(toFileEntry),
       truncated: result.truncated,
     };
   }
 
   async getFileInfo(id: string, path: string): Promise<SandboxFileInfo> {
     const sandbox = await this.sdk.get(id);
-    const info = await sandbox.getFileInfo(path);
-    return {
-      name: info.name,
-      path: info.path,
-      isDir: info.isDir,
-      ...(info.symlinkTarget === undefined ? {} : { symlinkTarget: info.symlinkTarget }),
-    };
+    return toFileEntry(await sandbox.getFileInfo(path));
   }
 
-  /** Uploads text to a path inside the sandbox. */
+  async fileExists(id: string, path: string): Promise<boolean> {
+    const sandbox = await this.sdk.get(id);
+    return sandbox.fileExists(path);
+  }
+
+  /** Uploads text or bytes to a path inside the sandbox. */
   async uploadFile(
     id: string,
     targetPath: string,
     data: string | Uint8Array,
-    options: UploadFileOptions = {},
+    options: SandboxUploadOptions = {},
   ): Promise<void> {
     const sandbox = await this.sdk.get(id);
     await sandbox.uploadFile(targetPath, data, options);
+  }
+
+  /** Uploads from a stream so a large local file never sits in memory. */
+  async uploadFileStream(
+    id: string,
+    targetPath: string,
+    data: SandboxUploadData,
+    options: SandboxUploadOptions = {},
+  ): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.uploadFileStream(targetPath, data, options);
+  }
+
+  /** Copies a local folder into a sandbox folder, which is made if missing. */
+  async uploadDir(id: string, localDir: string, remoteDir: string): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.uploadDir(localDir, remoteDir);
+  }
+
+  async downloadFile(
+    id: string,
+    path: string,
+    options: SandboxDownloadOptions = {},
+  ): Promise<Uint8Array> {
+    const sandbox = await this.sdk.get(id);
+    return sandbox.downloadFile(path, options);
+  }
+
+  /** Reads a sandbox file a piece at a time. */
+  async downloadFileStream(
+    id: string,
+    path: string,
+    options: SandboxDownloadOptions = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const sandbox = await this.sdk.get(id);
+    return sandbox.downloadFileStream(path, options);
+  }
+
+  async deleteFile(id: string, path: string, options: SandboxDeleteOptions = {}): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.deleteFile(path, options);
+  }
+
+  async makeDir(id: string, path: string, options: SandboxMakeDirOptions = {}): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.makeDir(path, options);
+  }
+
+  async moveFile(
+    id: string,
+    source: string,
+    destination: string,
+    options: SandboxMoveOptions = {},
+  ): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.moveFile(source, destination, options);
+  }
+
+  async copyFile(
+    id: string,
+    source: string,
+    destination: string,
+    options: SandboxCopyOptions = {},
+  ): Promise<void> {
+    const sandbox = await this.sdk.get(id);
+    await sandbox.copyFile(source, destination, options);
+  }
+
+  /** Finds paths under a folder whose name matches a pattern. */
+  async searchFiles(id: string, path: string, pattern: string): Promise<string[]> {
+    const sandbox = await this.sdk.get(id);
+    return sandbox.searchFiles(path, pattern);
+  }
+
+  /** Finds lines inside files under a folder that contain some text. */
+  async findInFiles(id: string, path: string, text: string): Promise<SandboxFileMatch[]> {
+    const sandbox = await this.sdk.get(id);
+    return (await sandbox.findInFiles(path, text)).map(toFileMatch);
   }
 
   /** Loads every page of the caller's snapshots, following the name cursor. */

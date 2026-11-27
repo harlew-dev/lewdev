@@ -64,6 +64,7 @@ describe("sandbox page actions", () => {
       "copy-ssh",
       "ssh-info",
       "ports",
+      "browse-files",
       "create-snapshot",
       "back",
     ]);
@@ -83,6 +84,7 @@ describe("sandbox page actions", () => {
       "copy-ssh": undefined,
       "ssh-info": undefined,
       ports: undefined,
+      "browse-files": undefined,
       "create-snapshot": undefined,
       back: "esc",
     });
@@ -194,6 +196,7 @@ describe("sandbox page actions", () => {
       "open-vscode",
       "copy-ssh",
       "ports",
+      "browse-files",
       "create-snapshot",
       "start",
       "stop",
@@ -224,6 +227,16 @@ describe("sandbox page actions", () => {
     );
     expect(actions.find((entry) => entry.id === "back")?.enabled).toBe(true);
   });
+
+  test("requires a running sandbox to browse files", () => {
+    const stopped = buildSandboxPageActions({ ...started, status: "stopped" });
+    expect(stopped.find((entry) => entry.id === "browse-files")?.unavailableReason).toBe(
+      "The sandbox must be running to browse its files.",
+    );
+    expect(
+      buildSandboxPageActions(started).find((entry) => entry.id === "browse-files")?.enabled,
+    ).toBe(true);
+  });
 });
 
 describe("sandbox page groups", () => {
@@ -246,6 +259,7 @@ describe("sandbox page groups", () => {
       "Terminal",
       "SSH",
       "Ports",
+      "Files",
       "Snapshots",
       undefined,
     ]);
@@ -254,6 +268,7 @@ describe("sandbox page groups", () => {
       ["ssh", "sessions"],
       ["open-vscode", "copy-ssh", "ssh-info"],
       ["ports"],
+      ["browse-files"],
       ["create-snapshot"],
       ["back"],
     ]);

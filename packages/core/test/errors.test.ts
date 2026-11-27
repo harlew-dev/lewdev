@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MicroVMApiError } from "@aerol-ai/aerolvm-sdk";
 
-import { describeError } from "../src/index.js";
+import { describeError, describeFileError, isFileAccessUnsupportedError } from "../src/index.js";
 
 describe("describeError", () => {
   test("explains a full team quota on 429", () => {
@@ -20,5 +20,12 @@ describe("describeError", () => {
     const error = new MicroVMApiError(404, "not found", { code: "missing" });
     expect(describeError(error)).toContain("HTTP 404");
     expect(describeError(error)).toContain("missing");
+  });
+
+  test("explains a missing file toolbox as unsupported file access", () => {
+    const error = new MicroVMApiError(501, "not implemented");
+    expect(isFileAccessUnsupportedError(error)).toBe(true);
+    expect(describeFileError(error)).toBe("This sandbox's runtime doesn't support file access.");
+    expect(describeFileError(new Error("other"))).toBe("other");
   });
 });

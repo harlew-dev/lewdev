@@ -33,6 +33,7 @@ export type ActionId =
   | "use-private-ssh"
   | "confirm-include"
   | "ports"
+  | "browse-files"
   | "delete"
   | "new"
   | "new-snapshot"
@@ -112,6 +113,7 @@ interface SandboxReasons {
   setupSsh?: string;
   directSsh?: string;
   ports?: string;
+  files?: string;
   snapshot?: string;
   start?: string;
   stop?: string;
@@ -160,6 +162,8 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
         : 'SSH is not set up yet. Use "Connect with VS Code / SSH" on the sandbox page first.');
 
   const portsReason = blocked ?? (running ? undefined : "Start the sandbox before managing ports.");
+  const filesReason =
+    blocked ?? (running ? undefined : "The sandbox must be running to browse its files.");
 
   const startReason = blocked ?? (running ? "The sandbox is already running." : undefined);
 
@@ -180,6 +184,7 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
     directSsh: directReason,
     addKey: directReason,
     ports: portsReason,
+    files: filesReason,
     snapshot: blocked,
     start: startReason,
     stop: stopReason,
@@ -478,6 +483,14 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       reasons.ports,
     ),
     action(
+      "browse-files",
+      "Browse files",
+      "files",
+      undefined,
+      "Browse the sandbox's files and upload or download them.",
+      reasons.files,
+    ),
+    action(
       "create-snapshot",
       "Create snapshot",
       "snapshot",
@@ -525,6 +538,7 @@ export function buildSandboxPageGroups(
       ...(portRows.length > 0 ? { ports: portRows } : { note: "No ports open" }),
       actions: collect(["ports"]),
     },
+    { title: "Files", actions: collect(["browse-files"]) },
     { title: "Snapshots", actions: collect(["create-snapshot"]) },
     { actions: collect(["back"]) },
   ];

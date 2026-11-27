@@ -12,13 +12,21 @@ export type {
   SandboxExecResult,
   SandboxExecStreamHandle,
   SandboxExecStreamOptions,
+  SandboxCopyOptions,
+  SandboxDeleteOptions,
+  SandboxDownloadOptions,
   SandboxFileEntry,
   SandboxFileInfo,
   SandboxFileList,
+  SandboxFileMatch,
   SandboxInfo,
   SandboxLifecycle,
+  SandboxMakeDirOptions,
+  SandboxMoveOptions,
   SandboxRuntime,
   SandboxStatusReason,
+  SandboxUploadData,
+  SandboxUploadOptions,
   SdkSandbox,
   SnapshotInfo,
   TeamQuotaInfo,
@@ -42,7 +50,26 @@ export {
   normalizeApiUrl,
   saveConfig,
 } from "./config.js";
-export { describeError } from "./errors.js";
+export { describeError, describeFileError, isFileAccessUnsupportedError } from "./errors.js";
+export type {
+  FileTransferApi,
+  LocalPathOptions,
+  LocalUploadSource,
+  PreparedDownload,
+} from "./file-transfer.js";
+export {
+  assertSafeLocalName,
+  defaultDownloadFolder,
+  displayLocalPath,
+  downloadToPath,
+  expandLocalPath,
+  inspectUploadSource,
+  localPathExists,
+  prepareDownloadDestination,
+  uniqueLocalPath,
+  uploadFileFromPath,
+  uploadFolderFromPath,
+} from "./file-transfer.js";
 export type { CliOutput, SandboxCommand } from "./cli.js";
 export { formatSandboxTable, isSandboxCommand, runSandboxCli } from "./cli.js";
 export { resolveSandbox, SandboxResolutionError } from "./sandbox-resolve.js";

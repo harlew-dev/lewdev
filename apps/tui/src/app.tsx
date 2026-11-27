@@ -8,7 +8,9 @@ import {
   completeRemotePath,
   type CreateSandboxInput,
   deletePrivateKey,
+  defaultDownloadFolder,
   describeError,
+  describeFileError,
   type DirectSshConfigBlock,
   type DirectSshMode,
   type DirectSshProgress,
@@ -16,6 +18,8 @@ import {
   DIRECT_SSH_STEPS,
   disableDirectSsh,
   directKeyExists,
+  displayLocalPath,
+  downloadToPath,
   enablePublicDirectSsh,
   ensureSshdRunning,
   openInVscode,
@@ -31,6 +35,7 @@ import {
   getSshConfigPath,
   getSshIncludeLine,
   hasSshInclude,
+  inspectUploadSource,
   isHiddenRemoteName,
   isStandaloneBuild,
   isSshdRunning,
@@ -39,8 +44,10 @@ import {
   type LewdevConfig,
   loadConfig,
   normalizeApiUrl,
+  normalizeRemotePath,
   joinRemotePath,
   parentRemotePath,
+  prepareDownloadDestination,
   privateKeyExists,
   readAuthorizedKeys,
   readDirectPublicKey,
@@ -65,6 +72,9 @@ import {
   type TeamQuotaInfo,
   type TerminalSession,
   type UpdateNotice,
+  uniqueLocalPath,
+  uploadFileFromPath,
+  uploadFolderFromPath,
   type UsageSummary,
 } from "@lewdev/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
@@ -126,6 +136,20 @@ import {
 } from "./components";
 import { safeHost, sandboxLabel } from "./format";
 import {
+  clampFilesSelection,
+  describeSearchError,
+  filesConflictOptions,
+  filesHints,
+  filesPathForInput,
+  filesTextInputActive,
+  filesUploadTarget,
+  initialFilesState,
+  moveFilesSelection,
+  nameSearchPattern,
+  type FilesState,
+  visibleFileEntries,
+} from "./files-browser";
+import {
   filterSandboxes,
   filterSnapshots,
   nextSortMode,
@@ -179,6 +203,7 @@ import { DeleteSandboxScreen } from "./screens/delete-sandbox";
 import { DeleteSnapshotScreen } from "./screens/delete-snapshot";
 import { DetailsScreen } from "./screens/details";
 import { DisableSshScreen } from "./screens/disable-ssh";
+import { FilesScreen } from "./screens/files";
 import {
   choicesWithCurrent,
   DELETE_IDLE_CHOICES,
@@ -484,6 +509,10 @@ export function App() {
   const [removeSshKeyError, setRemoveSshKeyError] = useState<string | null>(null);
   const [vscodeDir, setVscodeDir] = useState<VscodeDirState>(EMPTY_VSCODE_DIR);
   const lastVscodeDir = useRef<Record<string, string>>({});
+  const [files, setFiles] = useState<FilesState>(() => initialFilesState());
+  const lastFilesDir = useRef<Record<string, string>>({});
+  const filesRequestId = useRef(0);
+  const [filesDefaultFolder, setFilesDefaultFolder] = useState("~/Downloads");
 
   const terminalSession = useRef<TerminalSessionHandle | null>(null);
   const stackRef = useRef(stack);
@@ -580,6 +609,20 @@ export function App() {
       cancelled = true;
     };
   }, [showToast]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void defaultDownloadFolder()
+      .then((folder) => {
+        if (!cancelled) {
+          setFilesDefaultFolder(displayLocalPath(folder));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshList = useCallback(
     async (showLoading = false): Promise<SandboxInfo[]> => {
@@ -1134,6 +1177,18 @@ export function App() {
     [vscodeDir.entries, vscodeDir.showHidden],
   );
 
+  const filesEntries = useMemo(
+    () => visibleFileEntries(files.entries, files.filter),
+    [files.entries, files.filter],
+  );
+
+  useEffect(() => {
+    setFiles((previous) => {
+      const selected = clampFilesSelection(previous.selected, filesEntries.length);
+      return selected === previous.selected ? previous : { ...previous, selected };
+    });
+  }, [filesEntries.length]);
+
   const gatewayHost = useMemo(() => {
     if (!config) {
       return null;
@@ -1250,6 +1305,8 @@ export function App() {
       }
       case "open-port":
         return buildOpenPortActions();
+      case "files":
+        return [];
       case "delete-sandbox":
         return buildDeleteActions();
       case "connect":
@@ -1522,6 +1579,9 @@ export function App() {
         }
         return;
       }
+      case "browse-files":
+        openFileBrowser();
+        return;
       case "delete": {
         const target = actionTarget();
         if (target) {
@@ -2071,6 +2131,817 @@ export function App() {
       () => showToast("info", "Opening VS Code. The Remote - SSH extension is required."),
       (error: unknown) => showToast("error", describeError(error)),
     );
+  }
+
+  /** Loads a sandbox folder for the Files page. */
+  async function loadFiles(
+    sandboxId: string,
+    path: string,
+    options: { selectPath?: string } = {},
+  ): Promise<void> {
+    if (!api) {
+      return;
+    }
+    const target = normalizeRemotePath(path);
+    const request = filesRequestId.current + 1;
+    filesRequestId.current = request;
+    setFiles((previous) => ({
+      ...previous,
+      dir: target,
+      loading: true,
+      error: null,
+      ...(target === previous.dir ? {} : { entries: [], truncated: false, selected: 0 }),
+      ...(options.selectPath === undefined ? { selected: 0 } : {}),
+    }));
+    try {
+      const listing = await api.listFiles(sandboxId, target, { limit: 2000 });
+      if (request !== filesRequestId.current) {
+        return;
+      }
+      setFiles((previous) => {
+        const ordered = visibleFileEntries(listing.entries, previous.filter);
+        const found =
+          options.selectPath === undefined
+            ? previous.selected
+            : ordered.findIndex((entry) => entry.path === options.selectPath);
+        return {
+          ...previous,
+          dir: target,
+          entries: listing.entries,
+          truncated: listing.truncated,
+          loading: false,
+          error: null,
+          selected: clampFilesSelection(Math.max(found, 0), ordered.length),
+        };
+      });
+      lastFilesDir.current[sandboxId] = target;
+    } catch (error) {
+      if (request !== filesRequestId.current) {
+        return;
+      }
+      setFiles((previous) => ({
+        ...previous,
+        entries: [],
+        truncated: false,
+        loading: false,
+        error: describeFileError(error),
+      }));
+    }
+  }
+
+  function openFileBrowser(): void {
+    const target = actionTarget();
+    if (!target) {
+      return;
+    }
+    const start = lastFilesDir.current[target.id] ?? "/root";
+    setFiles(initialFilesState(start));
+    filesRequestId.current += 1;
+    pushSandboxScoped({ kind: "files", ...target });
+    void loadFiles(target.id, start);
+  }
+
+  function closeFileBrowser(): void {
+    const target = pageSandbox(page);
+    if (target) {
+      lastFilesDir.current[target.id] = files.dir;
+    }
+    pop();
+  }
+
+  async function openFilesPath(sandboxId: string, input: string): Promise<void> {
+    if (!api) {
+      return;
+    }
+    const path = filesPathForInput(files.dir, input);
+    setFiles((previous) => ({ ...previous, mode: "browse", inputError: null }));
+    try {
+      const info = await api.getFileInfo(sandboxId, path);
+      if (info.isDir) {
+        await loadFiles(sandboxId, info.path);
+      } else {
+        await loadFiles(sandboxId, parentRemotePath(info.path), { selectPath: info.path });
+      }
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "path",
+        inputError: describeFileError(error),
+      }));
+    }
+  }
+
+  function startFilesDownload(): void {
+    const entry = filesEntries[files.selected];
+    if (!entry) {
+      showToast("info", "Select a file first.");
+      return;
+    }
+    if (entry.isDir) {
+      showToast("info", "Folders can't be downloaded in this version.");
+      return;
+    }
+    setFiles((previous) => ({
+      ...previous,
+      mode: "download",
+      input: filesDefaultFolder,
+      inputError: null,
+      targetPath: entry.path,
+    }));
+  }
+
+  async function runFilesDownload(
+    sandboxId: string,
+    remotePath: string,
+    localPath: string,
+  ): Promise<void> {
+    if (!api) {
+      return;
+    }
+    setBusyMessage("Downloading…");
+    try {
+      await downloadToPath(api, sandboxId, remotePath, localPath);
+      showToast("success", `Saved ${remotePath} to ${displayLocalPath(localPath)}.`);
+      await loadFiles(sandboxId, files.dir);
+    } catch (error) {
+      showToast("error", describeFileError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitFilesDownload(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    const targetPath = files.targetPath;
+    if (!targetPath) {
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    setFiles((previous) => ({ ...previous, inputError: null }));
+    try {
+      const prepared = await prepareDownloadDestination(files.input, targetPath);
+      if (prepared.exists) {
+        setFiles((previous) => ({
+          ...previous,
+          mode: "conflict",
+          pending: {
+            kind: "download",
+            remotePath: targetPath,
+            folder: prepared.folder,
+            localPath: prepared.localPath,
+          },
+          conflictSelected: 0,
+          inputError: null,
+        }));
+        return;
+      }
+      setFiles((previous) => ({ ...previous, mode: "browse", inputError: null }));
+      await runFilesDownload(sandboxId, targetPath, prepared.localPath);
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "download",
+        inputError: describeFileError(error),
+      }));
+    }
+  }
+
+  async function runFilesUpload(
+    sandboxId: string,
+    localPath: string,
+    remotePath: string,
+    isDir: boolean,
+  ): Promise<void> {
+    if (!api) {
+      return;
+    }
+    setBusyMessage(isDir ? "Uploading folder…" : "Uploading file…");
+    try {
+      if (isDir) {
+        await uploadFolderFromPath(api, sandboxId, localPath, remotePath);
+      } else {
+        await uploadFileFromPath(api, sandboxId, localPath, remotePath);
+      }
+      showToast("success", `Uploaded to ${remotePath}.`);
+      await loadFiles(sandboxId, files.dir, { selectPath: remotePath });
+    } catch (error) {
+      showToast("error", describeFileError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitFilesUpload(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    setFiles((previous) => ({ ...previous, inputError: null }));
+    try {
+      const source = await inspectUploadSource(files.input);
+      const remotePath = filesUploadTarget(files.dir, source.name);
+      if (await api.fileExists(sandboxId, remotePath)) {
+        setFiles((previous) => ({
+          ...previous,
+          mode: "conflict",
+          pending: {
+            kind: "upload",
+            localPath: source.path,
+            remotePath,
+            isDir: source.kind === "folder",
+          },
+          conflictSelected: 0,
+        }));
+        return;
+      }
+      setFiles((previous) => ({ ...previous, mode: "browse", inputError: null }));
+      await runFilesUpload(sandboxId, source.path, remotePath, source.kind === "folder");
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "upload",
+        inputError: describeFileError(error),
+      }));
+    }
+  }
+
+  async function runFilesMove(
+    sandboxId: string,
+    source: string,
+    destination: string,
+    overwrite: boolean,
+  ): Promise<void> {
+    if (!api) {
+      return;
+    }
+    setBusyMessage("Renaming…");
+    try {
+      await api.moveFile(sandboxId, source, destination, { overwrite });
+      showToast("success", `Moved to ${destination}.`);
+      await loadFiles(sandboxId, files.dir, { selectPath: destination });
+    } catch (error) {
+      showToast("error", describeFileError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitFilesRename(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    const source = files.targetPath;
+    if (!source) {
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    const destination = filesPathForInput(files.dir, files.input);
+    if (destination === source) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "rename",
+        inputError: "Enter a different path.",
+      }));
+      return;
+    }
+    setFiles((previous) => ({ ...previous, inputError: null }));
+    try {
+      if (await api.fileExists(sandboxId, destination)) {
+        setFiles((previous) => ({
+          ...previous,
+          mode: "conflict",
+          pending: { kind: "rename", source, destination },
+          conflictSelected: 0,
+        }));
+        return;
+      }
+      setFiles((previous) => ({ ...previous, mode: "browse", inputError: null }));
+      await runFilesMove(sandboxId, source, destination, false);
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "rename",
+        inputError: describeFileError(error),
+      }));
+    }
+  }
+
+  async function submitFilesMkdir(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    if (!files.input.trim()) {
+      setFiles((previous) => ({ ...previous, inputError: "Enter a folder name." }));
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    const path = filesPathForInput(files.dir, files.input);
+    setFiles((previous) => ({ ...previous, inputError: null }));
+    try {
+      if (await api.fileExists(sandboxId, path)) {
+        setFiles((previous) => ({
+          ...previous,
+          mode: "mkdir",
+          inputError: "A file or folder with that name already exists.",
+        }));
+        return;
+      }
+      setBusyMessage("Creating folder…");
+      await api.makeDir(sandboxId, path, { parents: true });
+      setFiles((previous) => ({ ...previous, mode: "browse", inputError: null }));
+      showToast("success", `Created ${path}.`);
+      await loadFiles(sandboxId, files.dir, { selectPath: path });
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "mkdir",
+        inputError: describeFileError(error),
+      }));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitFilesDelete(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    const entry = files.deleteTarget;
+    if (!entry) {
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    setBusyMessage(`Deleting ${entry.name}…`);
+    try {
+      await api.deleteFile(sandboxId, entry.path, { recursive: entry.isDir });
+      setFiles((previous) => ({
+        ...previous,
+        mode: "browse",
+        deleteTarget: null,
+        inputError: null,
+      }));
+      showToast("success", `Deleted ${entry.path}.`);
+      await loadFiles(sandboxId, files.dir);
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "delete",
+        inputError: describeFileError(error),
+      }));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function submitFilesSearch(): Promise<void> {
+    if (!api || busyMessage) {
+      return;
+    }
+    const query = files.input.trim();
+    if (!query) {
+      setFiles((previous) => ({
+        ...previous,
+        inputError:
+          previous.searchKind === "name" ? "Enter a name pattern." : "Enter the text to find.",
+      }));
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    const kind = files.searchKind;
+    setBusyMessage(kind === "name" ? "Searching by name…" : "Searching file contents…");
+    try {
+      const results =
+        kind === "name"
+          ? (await api.searchFiles(sandboxId, files.dir, nameSearchPattern(query))).map((path) => ({
+              path,
+            }))
+          : (await api.findInFiles(sandboxId, files.dir, query)).map((match) => ({
+              path: match.file,
+              line: match.line,
+              content: match.content,
+            }));
+      setFiles((previous) => ({
+        ...previous,
+        mode: "search-results",
+        results,
+        resultsSelected: 0,
+        resultsQuery: query,
+        inputError: null,
+        error: null,
+      }));
+    } catch (error) {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "search",
+        inputError: describeSearchError(error),
+      }));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  function openFilesSearchResult(): void {
+    const result = files.results[files.resultsSelected];
+    if (!result) {
+      return;
+    }
+    const target = pageSandbox(page);
+    if (!target) {
+      return;
+    }
+    const path = result.path.startsWith("/")
+      ? normalizeRemotePath(result.path)
+      : joinRemotePath(files.dir, result.path);
+    setFiles((previous) => ({ ...previous, mode: "browse", error: null }));
+    void loadFiles(target.id, parentRemotePath(path), { selectPath: path });
+  }
+
+  async function chooseFilesConflict(index: number): Promise<void> {
+    const pending = files.pending;
+    const option = filesConflictOptions(pending)[index];
+    if (!pending || !option || busyMessage) {
+      return;
+    }
+    if (option.id === "cancel") {
+      setFiles((previous) => ({
+        ...previous,
+        mode: "browse",
+        pending: null,
+        inputError: null,
+      }));
+      return;
+    }
+    const sandboxId = pageSandbox(page)?.id;
+    if (!sandboxId) {
+      return;
+    }
+    setFiles((previous) => ({
+      ...previous,
+      mode: "browse",
+      pending: null,
+      inputError: null,
+    }));
+    if (pending.kind === "download") {
+      let localPath = pending.localPath;
+      if (option.id === "keep-both") {
+        try {
+          localPath = await uniqueLocalPath(pending.localPath);
+        } catch (error) {
+          showToast("error", describeFileError(error));
+          return;
+        }
+      }
+      await runFilesDownload(sandboxId, pending.remotePath, localPath);
+      return;
+    }
+    if (pending.kind === "upload") {
+      await runFilesUpload(sandboxId, pending.localPath, pending.remotePath, pending.isDir);
+      return;
+    }
+    await runFilesMove(sandboxId, pending.source, pending.destination, true);
+  }
+
+  function appendFilesInput(text: string): void {
+    setFiles((previous) => {
+      if (previous.filterEditing && previous.mode === "browse") {
+        return { ...previous, filter: `${previous.filter}${text}` };
+      }
+      return { ...previous, input: `${previous.input}${text}` };
+    });
+  }
+
+  function backspaceFilesInput(): void {
+    setFiles((previous) => {
+      if (previous.filterEditing && previous.mode === "browse") {
+        return { ...previous, filter: removeLastChar(previous.filter) };
+      }
+      return { ...previous, input: removeLastChar(previous.input) };
+    });
+  }
+
+  /** Handles every key on the Files page; returns true when it was consumed. */
+  function handleFilesKey(key: KeyEvent, sandboxId: string): boolean {
+    const pressed = actionKey(key);
+    const plain = !key.ctrl && !key.meta;
+    const press = (letter: string): boolean => plain && pressed === letter;
+
+    if (files.mode === "browse" && files.filterEditing) {
+      if (key.name === "escape") {
+        setFiles((previous) => ({ ...previous, filter: "", filterEditing: false }));
+        return true;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        setFiles((previous) => ({ ...previous, filterEditing: false }));
+        return true;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        backspaceFilesInput();
+        return true;
+      }
+      const char = printableChar(key);
+      if (char) {
+        appendFilesInput(char);
+        return true;
+      }
+      return false;
+    }
+
+    switch (files.mode) {
+      case "browse": {
+        if (key.name === "escape") {
+          closeFileBrowser();
+          return true;
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          if (files.dir !== "/") {
+            void loadFiles(sandboxId, parentRemotePath(files.dir));
+          }
+          return true;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          const entry = filesEntries[files.selected];
+          if (!entry) {
+            return true;
+          }
+          if (entry.isDir) {
+            setFiles((previous) => ({ ...previous, filter: "", filterEditing: false }));
+            void loadFiles(sandboxId, entry.path);
+          } else {
+            showToast("info", "Press d to download this file.");
+          }
+          return true;
+        }
+        if (key.name === "down" || pressed === "j") {
+          setFiles((previous) => ({
+            ...previous,
+            selected: moveFilesSelection(previous.selected, 1, filesEntries.length),
+          }));
+          return true;
+        }
+        if (key.name === "up" || pressed === "k") {
+          setFiles((previous) => ({
+            ...previous,
+            selected: moveFilesSelection(previous.selected, -1, filesEntries.length),
+          }));
+          return true;
+        }
+        if (press("/")) {
+          setFiles((previous) => ({ ...previous, filterEditing: true }));
+          return true;
+        }
+        if (press("g")) {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "path",
+            input: previous.dir,
+            inputError: null,
+          }));
+          return true;
+        }
+        if (press("u")) {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "upload",
+            input: "",
+            inputError: null,
+            targetPath: null,
+          }));
+          return true;
+        }
+        if (press("d")) {
+          startFilesDownload();
+          return true;
+        }
+        if (press("r")) {
+          const entry = filesEntries[files.selected];
+          if (!entry) {
+            showToast("info", "Select a file or folder first.");
+            return true;
+          }
+          setFiles((previous) => ({
+            ...previous,
+            mode: "rename",
+            input: entry.path,
+            inputError: null,
+            targetPath: entry.path,
+          }));
+          return true;
+        }
+        if (press("x")) {
+          const entry = filesEntries[files.selected];
+          if (!entry) {
+            showToast("info", "Select a file or folder first.");
+            return true;
+          }
+          setFiles((previous) => ({
+            ...previous,
+            mode: "delete",
+            deleteTarget: entry,
+            targetPath: entry.path,
+            inputError: null,
+          }));
+          return true;
+        }
+        if (press("n")) {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "mkdir",
+            input: "",
+            inputError: null,
+            targetPath: null,
+          }));
+          return true;
+        }
+        if (press("s")) {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "search",
+            input: "",
+            inputError: null,
+            targetPath: null,
+            searchKind: "name",
+          }));
+          return true;
+        }
+        return false;
+      }
+      case "delete": {
+        if (key.name === "escape") {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "browse",
+            deleteTarget: null,
+            targetPath: null,
+            inputError: null,
+          }));
+          return true;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          void submitFilesDelete();
+          return true;
+        }
+        return false;
+      }
+      case "conflict": {
+        const count = filesConflictOptions(files.pending).length;
+        if (key.name === "escape") {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "browse",
+            pending: null,
+            inputError: null,
+          }));
+          return true;
+        }
+        if (key.name === "down" || pressed === "j") {
+          setFiles((previous) => ({
+            ...previous,
+            conflictSelected: Math.min(previous.conflictSelected + 1, Math.max(0, count - 1)),
+          }));
+          return true;
+        }
+        if (key.name === "up" || pressed === "k") {
+          setFiles((previous) => ({
+            ...previous,
+            conflictSelected: Math.max(previous.conflictSelected - 1, 0),
+          }));
+          return true;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          void chooseFilesConflict(files.conflictSelected);
+          return true;
+        }
+        return false;
+      }
+      case "search-results": {
+        if (key.name === "escape") {
+          setFiles((previous) => ({ ...previous, mode: "browse", error: null }));
+          return true;
+        }
+        if (key.name === "down" || pressed === "j") {
+          setFiles((previous) => ({
+            ...previous,
+            resultsSelected: moveFilesSelection(
+              previous.resultsSelected,
+              1,
+              previous.results.length,
+            ),
+          }));
+          return true;
+        }
+        if (key.name === "up" || pressed === "k") {
+          setFiles((previous) => ({
+            ...previous,
+            resultsSelected: moveFilesSelection(
+              previous.resultsSelected,
+              -1,
+              previous.results.length,
+            ),
+          }));
+          return true;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          openFilesSearchResult();
+          return true;
+        }
+        return false;
+      }
+      case "search": {
+        if (key.name === "escape") {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "browse",
+            inputError: null,
+          }));
+          return true;
+        }
+        if (key.name === "tab") {
+          setFiles((previous) => ({
+            ...previous,
+            searchKind: previous.searchKind === "name" ? "text" : "name",
+            inputError: null,
+          }));
+          return true;
+        }
+        break;
+      }
+      case "path":
+      case "upload":
+      case "download":
+      case "rename":
+      case "mkdir":
+        if (key.name === "escape") {
+          setFiles((previous) => ({
+            ...previous,
+            mode: "browse",
+            inputError: null,
+            pending: null,
+          }));
+          return true;
+        }
+        break;
+    }
+
+    if (!filesTextInputActive(files)) {
+      return false;
+    }
+
+    if (key.name === "backspace" || key.name === "delete") {
+      backspaceFilesInput();
+      return true;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      switch (files.mode) {
+        case "path":
+          void openFilesPath(sandboxId, files.input);
+          return true;
+        case "upload":
+          void submitFilesUpload();
+          return true;
+        case "download":
+          void submitFilesDownload();
+          return true;
+        case "rename":
+          void submitFilesRename();
+          return true;
+        case "mkdir":
+          void submitFilesMkdir();
+          return true;
+        case "search":
+          void submitFilesSearch();
+          return true;
+        default:
+          return false;
+      }
+    }
+    if (filesTextInputActive(files)) {
+      const char = printableChar(key);
+      if (char) {
+        appendFilesInput(char);
+        return true;
+      }
+    }
+    return false;
   }
 
   async function copySshCommand(): Promise<void> {
@@ -2928,6 +3799,8 @@ export function App() {
       case "add-ssh-key":
       case "vscode-directory":
         return true;
+      case "files":
+        return filesTextInputActive(files);
       case "resize":
         return (
           resizeFocus === "size-cpu" || resizeFocus === "size-memory" || resizeFocus === "size-disk"
@@ -2975,6 +3848,13 @@ export function App() {
 
     const text = raw.replace(/[\r\n\t]+/g, " ").trim();
     if (!text) {
+      return;
+    }
+
+    if (page.kind === "files") {
+      if (filesTextInputActive(files)) {
+        appendFilesInput(text);
+      }
       return;
     }
 
@@ -3265,6 +4145,13 @@ export function App() {
           ...previous,
           pathInput: appendText(previous.pathInput, char),
         }));
+      }
+      return;
+    }
+
+    if (page.kind === "files") {
+      if (handleFilesKey(key, page.id)) {
+        key.preventDefault();
       }
       return;
     }
@@ -4231,6 +5118,9 @@ export function App() {
         ["esc", "back"],
       ];
     }
+    if (page.kind === "files") {
+      return filesHints(files);
+    }
     if (page.kind === "remove-ssh-key") {
       return actionHints(actions, {
         extra: [
@@ -4463,6 +5353,7 @@ export function App() {
     newSnapshotValues.dockerfileMode,
     lifecycleFocus,
     resizeFocus,
+    files,
   ]);
 
   const helpGlobalHints = useMemo<ActionHint[]>(() => {
@@ -4704,6 +5595,9 @@ export function App() {
           showHidden={vscodeDir.showHidden}
         />
       );
+      break;
+    case "files":
+      content = <FilesScreen state={files} entries={filesEntries} />;
       break;
     case "ports":
       content = (
