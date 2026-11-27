@@ -6,7 +6,14 @@ lewdev stores its config, sandbox SSH keys and gateway host keys under `$XDG_CON
 | -------------------------- | ---------------------------------------------- |
 | `SB_API_URL`               | AerolVM server URL; overrides the saved value  |
 | `SB_API_TOKEN`             | AerolVM API token; overrides the saved value   |
+| `LEWDEV_PROFILE`           | saved profile to use instead of the active one |
 | `LEWDEV_NO_UPDATE_CHECK=1` | turns off the daily [update check](updates.md) |
+
+## Profiles
+
+`config.json` can hold several servers or accounts, each saved as a named profile. A config written by an older lewdev becomes the `default` profile the first time a profile is saved. Add, switch and delete profiles on the **Account** tab, or press `p` on the Sandboxes or Snapshots list. CLI commands take `--profile <name>`; naming a profile that does not exist is an error rather than a fallback.
+
+Private direct-SSH entries record their profile in the ProxyCommand (`lewdev ssh-proxy --profile <name> <sandbox-id>`), so switching profiles never sends a sandbox's SSH to another server. Entries written before profiles existed have no `--profile` and keep using the `default` profile. While `SB_API_URL` or `SB_API_TOKEN` is set, the environment decides the server, so lewdev does not let you switch or edit profiles.
 
 SSH keys are saved when you create a sandbox through lewdev. lewdev keeps its host keys in its own `known_hosts` and never edits `~/.ssh/known_hosts`. When the gateway resolves to several nodes with different host keys, choose **Trust gateway host keys** on the SSH settings page to scan and save every node's key.
 

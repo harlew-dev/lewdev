@@ -29,6 +29,10 @@ Bun may not be on `PATH` in non-login shells; use `~/.bun/bin/bun` when needed.
 - On Unix, config and key files use mode `0600` and directories use `0700`. On Windows,
   the config directory and its files use ACLs scoped to the current user. Tests must use
   temporary `XDG_CONFIG_HOME` values and must never touch the real `~/.config/lewdev`.
+- `config.json` holds named profiles (`profiles`, `activeProfile`); a version 1 file (top-level
+  `apiUrl`/`apiToken`) reads as the `default` profile. Private SSH blocks record their profile as
+  `ssh-proxy --profile <name> <id>`; blocks without it use `default`. Never log or render tokens,
+  and show a newly created API token's secret once without storing it.
 - SDK calls go through `packages/core/src/client.ts`. The `AerolSdk` interface exists so tests can
   inject a fake instead of contacting a server.
 - The TUI must not crash on SDK or filesystem errors: show an inline message or toast.
