@@ -1,4 +1,9 @@
-import type { SandboxLifecycle, SnapshotInfo } from "@lewdev/core";
+import type {
+  ContainerRuntime,
+  RuntimeAvailabilityReport,
+  SandboxLifecycle,
+  SnapshotInfo,
+} from "@lewdev/core";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -8,6 +13,7 @@ export type ImageSource = "preset" | "snapshot" | "custom" | "dockerfile";
 export type DockerfileMode = "file" | "paste";
 export type SizeId = "small" | "default" | "large" | "xlarge" | "custom";
 export type StopIdleId = "off" | "15m" | "30m" | "1h" | "2h" | "4h";
+export type RuntimeChoice = "default" | ContainerRuntime;
 export type CreateFocus =
   | "image"
   | "image-ref"
@@ -18,6 +24,7 @@ export type CreateFocus =
   | "size-cpu"
   | "size-memory"
   | "size-disk"
+  | "runtime"
   | "stop-idle"
   | "name"
   | "submit";
@@ -37,6 +44,7 @@ export interface CreateFormValues extends SizeFormValues {
   dockerfileMode: DockerfileMode;
   dockerfilePath: string;
   dockerfileContents: string;
+  runtime: RuntimeChoice;
   stopIdle: StopIdleId;
   name: string;
 }
@@ -53,6 +61,7 @@ export const CREATE_DEFAULT: CreateFormValues = {
   customCpu: "",
   customMemoryGB: "",
   customDiskGB: "",
+  runtime: "default",
   stopIdle: "off",
   name: "",
 };
@@ -79,6 +88,119 @@ export function toggleStopIdle(current: StopIdleId, delta: number): StopIdleId {
   const base = Math.max(index, 0);
   const next = (base + delta + STOP_IDLE_CHOICES.length) % STOP_IDLE_CHOICES.length;
   return STOP_IDLE_CHOICES[next]?.id ?? "off";
+}
+
+export const RUNTIME_CHOICES: Array<{
+  id: RuntimeChoice;
+  label: string;
+  runtime?: ContainerRuntime;
+}> = [
+  { id: "default", label: "Default" },
+  { id: "docker", label: "Docker", runtime: "docker" },
+  { id: "gvisor", label: "gVisor", runtime: "gvisor" },
+  { id: "firecracker", label: "Firecracker", runtime: "firecracker" },
+];
+
+export const RUNTIME_LABELS: Record<ContainerRuntime, string> = {
+  docker: "Docker",
+  gvisor: "gVisor",
+  firecracker: "Firecracker",
+};
+
+/** Shown until the health request answers; also the fallback when it fails. */
+export const UNKNOWN_RUNTIME_REPORT: RuntimeAvailabilityReport = {
+  docker: { state: "unknown" },
+  gvisor: { state: "unknown" },
+  firecracker: { state: "unknown" },
+};
+
+const RUNTIME_HINTS: Record<RuntimeChoice, string> = {
+  default: "Uses the server's default runtime (Docker unless the operator changed it).",
+  docker: "The standard container runtime.",
+  gvisor: "Ignores per-sandbox disk quotas and cannot use GPUs.",
+  firecracker: "First boot takes 10–60 seconds.",
+};
+
+export interface RuntimeOption {
+  id: RuntimeChoice;
+  label: string;
+  disabled?: boolean;
+}
+
+/** Segmented-row options, muting runtimes the server reports off or unhealthy. */
+export function runtimeRowOptions(report: RuntimeAvailabilityReport): RuntimeOption[] {
+  return RUNTIME_CHOICES.map((choice) => {
+    if (choice.runtime === undefined) {
+      return { id: choice.id, label: choice.label };
+    }
+    const state = report[choice.runtime].state;
+    return {
+      id: choice.id,
+      label: choice.label,
+      ...(state === "off" || state === "unhealthy" ? { disabled: true } : {}),
+    };
+  });
+}
+
+/** Moves through the enabled runtimes, wrapping and skipping muted ones. */
+export function moveRuntimeChoice(
+  current: RuntimeChoice,
+  delta: number,
+  report: RuntimeAvailabilityReport,
+): RuntimeChoice {
+  const options = runtimeRowOptions(report);
+  let index = Math.max(
+    options.findIndex((option) => option.id === current),
+    0,
+  );
+  for (let step = 0; step < options.length; step += 1) {
+    index = (index + delta + options.length) % options.length;
+    const option = options[index];
+    if (option && !option.disabled) {
+      return option.id;
+    }
+  }
+  return "default";
+}
+
+/** The runtime to send, or undefined to leave the server's default alone. */
+export function createRuntimeInput(values: {
+  runtime: RuntimeChoice;
+}): ContainerRuntime | undefined {
+  return values.runtime === "default" ? undefined : values.runtime;
+}
+
+export function runtimeHint(choice: RuntimeChoice): string {
+  return RUNTIME_HINTS[choice];
+}
+
+/** Why a runtime the server did not report is still selectable, or null. */
+export function runtimeUnknownNote(
+  choice: RuntimeChoice,
+  report: RuntimeAvailabilityReport,
+): string | null {
+  if (choice === "default" || report[choice].state !== "unknown") {
+    return null;
+  }
+  return `This server doesn't report ${RUNTIME_LABELS[choice]}; the create fails if it isn't enabled.`;
+}
+
+/** One muted line listing the runtimes the server reports as unavailable. */
+export function runtimeUnavailableSummary(report: RuntimeAvailabilityReport): string | null {
+  const parts = RUNTIME_CHOICES.flatMap((choice) => {
+    if (choice.runtime === undefined) {
+      return [];
+    }
+    const status = report[choice.runtime];
+    if (status.state === "off") {
+      return [`${choice.label}: disabled`];
+    }
+    if (status.state === "unhealthy") {
+      return [`${choice.label}: ${status.detail ?? "unhealthy"}`];
+    }
+    return [];
+  });
+  return parts.length === 0 ? null : parts.join(" · ");
 }
 
 export interface SizePreset {
@@ -266,7 +388,7 @@ export function createFocusOrder(values: CreateFormValues): CreateFocus[] {
   if (values.size === "custom") {
     order.push("size-cpu", "size-memory", "size-disk");
   }
-  order.push("stop-idle", "name", "submit");
+  order.push("runtime", "stop-idle", "name", "submit");
   return order;
 }
 

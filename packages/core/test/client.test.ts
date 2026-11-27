@@ -999,6 +999,52 @@ describe("LewdevApi", () => {
     expect(health.version).toBe("0.8.3");
     expect(calls.map((call) => call.method)).toEqual(["health"]);
   });
+
+  test("maps the raw /health runtime fields", async () => {
+    const { sdk } = fakeSdk();
+    const api = new LewdevApi(sdk, async () => ({
+      status: "ok",
+      docker: "ok",
+      gvisor: "disabled",
+      firecracker: "failed to start",
+      version: "v0.7.0",
+    }));
+
+    expect(await api.getRuntimeAvailability()).toEqual({
+      docker: { state: "available" },
+      gvisor: { state: "off" },
+      firecracker: { state: "unhealthy", detail: "failed to start" },
+    });
+  });
+
+  test("reads missing runtime fields and a failed health request as unknown", async () => {
+    const { sdk } = fakeSdk();
+    const missing = new LewdevApi(sdk, async () => ({ status: "ok", docker: "ok" }));
+    expect(await missing.getRuntimeAvailability()).toEqual({
+      docker: { state: "available" },
+      gvisor: { state: "unknown" },
+      firecracker: { state: "unknown" },
+    });
+
+    const failed = new LewdevApi(sdk, async () => {
+      throw new Error("offline");
+    });
+    expect(await failed.getRuntimeAvailability()).toEqual({
+      docker: { state: "unknown" },
+      gvisor: { state: "unknown" },
+      firecracker: { state: "unknown" },
+    });
+  });
+
+  test("passes the chosen runtime through on create", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.createSandbox({ image: "ubuntu:24.04", runtime: "firecracker" });
+    expect(calls[0]).toEqual({
+      method: "create",
+      args: [{ image: "ubuntu:24.04", runtime: "firecracker" }],
+    });
+  });
 });
 
 describe("LewdevApi snapshots", () => {

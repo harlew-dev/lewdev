@@ -136,6 +136,25 @@ export interface TerminalSessionAttachHandle {
 /** A sandbox execution runtime; WASM and isolate sandboxes have no shell. */
 export type SandboxRuntime = "docker" | "gvisor" | "kata" | "firecracker" | "wasm" | "isolate";
 
+/** The container runtimes the New sandbox form offers. */
+export type ContainerRuntime = "docker" | "gvisor" | "firecracker";
+
+/** What the server's `/health` reports for one runtime. */
+export type RuntimeAvailabilityState = "available" | "off" | "unhealthy" | "unknown";
+
+export interface RuntimeAvailability {
+  state: RuntimeAvailabilityState;
+  /** The server's status text when it is `unhealthy`. */
+  detail?: string;
+}
+
+/** `/health` runtime fields for every runtime the create form can offer. */
+export interface RuntimeAvailabilityReport {
+  docker: RuntimeAvailability;
+  gvisor: RuntimeAvailability;
+  firecracker: RuntimeAvailability;
+}
+
 /** Why the server put the sandbox in its current status. */
 export type SandboxStatusReason =
   | "user_stop"
@@ -358,6 +377,8 @@ export interface CreateSandboxInput {
   memoryMB?: number;
   diskGB?: number;
   lifecycle?: SandboxLifecycle;
+  /** Omit to use the server's default runtime. */
+  runtime?: ContainerRuntime;
 }
 
 export interface SandboxExecResult {
@@ -1059,24 +1080,91 @@ function toAuditOptions(query: AuditQuery): AuditOptions {
   return options;
 }
 
+function readRuntimeAvailability(
+  health: Record<string, unknown>,
+  runtime: ContainerRuntime,
+): RuntimeAvailability {
+  const value = health[runtime];
+  if (typeof value !== "string") {
+    return { state: "unknown" };
+  }
+  if (value === "ok") {
+    return { state: "available" };
+  }
+  if (value === "disabled") {
+    return { state: "off" };
+  }
+  return { state: "unhealthy", detail: value };
+}
+
+/**
+ * Maps a raw `/health` body to the three runtimes the create form offers. The
+ * SDK's `health()` drops these fields, so lewdev reads them itself.
+ */
+export function runtimeAvailabilityFromHealth(raw: unknown): RuntimeAvailabilityReport {
+  const health =
+    typeof raw === "object" && raw !== null
+      ? (raw as Record<string, unknown>)
+      : Object.create(null);
+  return {
+    docker: readRuntimeAvailability(health, "docker"),
+    gvisor: readRuntimeAvailability(health, "gvisor"),
+    firecracker: readRuntimeAvailability(health, "firecracker"),
+  };
+}
+
+const HEALTH_TIMEOUT_MS = 5000;
+
+/** Fetches `/health` (no version prefix) with the bearer auth the SDK sends. */
+async function fetchHealthJson(apiUrl: string, token: string): Promise<unknown> {
+  const response = await fetch(`${apiUrl}/health`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`Health check failed (${response.status}).`);
+  }
+  return response.json();
+}
+
 /**
  * A UI-free wrapper around the AerolVM SDK. Every network call goes through the
  * injected `AerolSdk`, which keeps the UI easy to test without a server.
  */
 export class LewdevApi {
-  constructor(private readonly sdk: AerolSdk) {}
+  constructor(
+    private readonly sdk: AerolSdk,
+    private readonly fetchHealth?: () => Promise<unknown>,
+  ) {}
 
   static fromConfig(config: LewdevConfig): LewdevApi {
+    const apiUrl = normalizeApiUrl(config.apiUrl);
     return new LewdevApi(
       new MicroVM({
-        apiUrl: normalizeApiUrl(config.apiUrl),
+        apiUrl,
         patToken: config.apiToken,
       }),
+      () => fetchHealthJson(apiUrl, config.apiToken),
     );
   }
 
   async health(): Promise<HealthStatus> {
     return this.sdk.health();
+  }
+
+  /**
+   * Which runtimes this server offers. A failed `/health` request reads as
+   * unknown for every runtime, so the create form never blocks.
+   */
+  async getRuntimeAvailability(): Promise<RuntimeAvailabilityReport> {
+    if (this.fetchHealth === undefined) {
+      return runtimeAvailabilityFromHealth(undefined);
+    }
+    try {
+      return runtimeAvailabilityFromHealth(await this.fetchHealth());
+    } catch {
+      return runtimeAvailabilityFromHealth(undefined);
+    }
   }
 
   async listSandboxes(): Promise<SandboxInfo[]> {
@@ -1116,6 +1204,9 @@ export class LewdevApi {
     }
     if (input.lifecycle !== undefined) {
       options.lifecycle = toSdkLifecycle(input.lifecycle);
+    }
+    if (input.runtime !== undefined) {
+      options.runtime = input.runtime;
     }
 
     const sandbox = await this.sdk.create(options);

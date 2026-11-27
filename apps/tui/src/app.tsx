@@ -70,6 +70,7 @@ import {
   removeAuthorizedKey,
   resetDirectSsh,
   resolveRemotePath,
+  type RuntimeAvailabilityReport,
   type SandboxDetails,
   type SandboxFileEntry,
   type SandboxInfo,
@@ -237,11 +238,14 @@ import {
   type CreateFocus,
   type CreateFormValues,
   createLifecycleInput,
+  createRuntimeInput,
+  runtimeRowOptions,
   createSizeInput,
   type DockerfileMode,
   IMAGE_MENU_OPTIONS,
   imageOptionIndex,
   menuOptionAt,
+  moveRuntimeChoice,
   moveSize,
   nextCreateFocus,
   nextMenuIndex,
@@ -251,6 +255,7 @@ import {
   snapshotOptionIndex,
   toggleDockerfileMode,
   toggleStopIdle,
+  UNKNOWN_RUNTIME_REPORT,
 } from "./create-form";
 import { CreateScreen } from "./screens/create";
 import { ConfirmCreateSnapshotScreen } from "./screens/confirm-create-snapshot";
@@ -572,6 +577,9 @@ export function App() {
   const [createValues, setCreateValues] = useState<CreateFormValues>(CREATE_DEFAULT);
   const [createFocus, setCreateFocus] = useState<CreateFocus>("image");
   const [createError, setCreateError] = useState<string | null>(null);
+  const [createRuntimeAvailability, setCreateRuntimeAvailability] =
+    useState<RuntimeAvailabilityReport>(UNKNOWN_RUNTIME_REPORT);
+  const createRuntimeRequest = useRef(0);
   const [imageMenuOpen, setImageMenuOpen] = useState(false);
   const [imageMenuIndex, setImageMenuIndex] = useState(0);
   const [snapshotMenuOpen, setSnapshotMenuOpen] = useState(false);
@@ -4273,10 +4281,30 @@ export function App() {
     }
   }
 
+  /** Reads the server's runtime list once each time the create form opens. */
+  async function loadCreateRuntimeAvailability(): Promise<void> {
+    const request = ++createRuntimeRequest.current;
+    const report = api ? await api.getRuntimeAvailability() : UNKNOWN_RUNTIME_REPORT;
+    if (createRuntimeRequest.current === request) {
+      setCreateRuntimeAvailability(report);
+      // A runtime picked before the report arrived may turn out to be off.
+      const muted = new Set(
+        runtimeRowOptions(report)
+          .filter((option) => option.disabled)
+          .map((option) => option.id),
+      );
+      setCreateValues((previous) =>
+        muted.has(previous.runtime) ? { ...previous, runtime: "default" } : previous,
+      );
+    }
+  }
+
   function openCreate(): void {
     setCreateValues(CREATE_DEFAULT);
     setCreateFocus("image");
     setCreateError(null);
+    setCreateRuntimeAvailability(UNKNOWN_RUNTIME_REPORT);
+    void loadCreateRuntimeAvailability();
     setImageMenuOpen(false);
     setImageMenuIndex(0);
     setSnapshotMenuOpen(false);
@@ -4288,6 +4316,8 @@ export function App() {
     setCreateValues(createValuesFromSnapshot(snapshot));
     setCreateFocus("image-snapshot");
     setCreateError(null);
+    setCreateRuntimeAvailability(UNKNOWN_RUNTIME_REPORT);
+    void loadCreateRuntimeAvailability();
     setImageMenuOpen(false);
     setImageMenuIndex(0);
     setSnapshotMenuOpen(false);
@@ -4633,6 +4663,10 @@ export function App() {
       const lifecycle = createLifecycleInput(createValues);
       if (lifecycle !== undefined) {
         input.lifecycle = lifecycle;
+      }
+      const runtime = createRuntimeInput(createValues);
+      if (runtime !== undefined) {
+        input.runtime = runtime;
       }
 
       switch (createValues.imageSource) {
@@ -6405,6 +6439,20 @@ export function App() {
         return;
       }
 
+      if (createFocus === "runtime") {
+        if (key.name === "left" || key.name === "right") {
+          setCreateValues((previous) => ({
+            ...previous,
+            runtime: moveRuntimeChoice(
+              previous.runtime,
+              key.name === "left" ? -1 : 1,
+              createRuntimeAvailability,
+            ),
+          }));
+        }
+        return;
+      }
+
       if (createFocus === "stop-idle") {
         if (key.name === "left" || key.name === "right") {
           setCreateValues((previous) => ({
@@ -6987,6 +7035,8 @@ export function App() {
         extra.push(["enter", "newline"]);
       } else if (createFocus === "size") {
         extra.push(["←/→", "preset"]);
+      } else if (createFocus === "runtime") {
+        extra.push(["←/→", "runtime"], ["enter", "next field"]);
       } else if (createFocus === "stop-idle") {
         extra.push(["←/→", "idle time"], ["enter", "next field"]);
       } else {
@@ -7241,6 +7291,7 @@ export function App() {
           snapshotMenuOpen={snapshotMenuOpen}
           snapshotMenuIndex={snapshotMenuIndex}
           snapshotMenuOptions={snapshotMenuOptions}
+          runtimeAvailability={createRuntimeAvailability}
           error={createError}
         />
       );

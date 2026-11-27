@@ -216,7 +216,7 @@ export function SegmentedRow({
   labelWidth = 14,
 }: {
   label: string;
-  options: ReadonlyArray<{ id: string; label: string }>;
+  options: ReadonlyArray<{ id: string; label: string; disabled?: boolean }>;
   selected: string;
   active: boolean;
   labelWidth?: number;
@@ -235,7 +235,17 @@ export function SegmentedRow({
             paddingRight={1}
             backgroundColor={isSelected ? colors.selection : colors.panelAlt}
           >
-            <text fg={isSelected ? colors.accent : colors.muted}>{option.label}</text>
+            <text
+              fg={
+                isSelected && !option.disabled
+                  ? colors.accent
+                  : option.disabled
+                    ? colors.border
+                    : colors.muted
+              }
+            >
+              {option.label}
+            </text>
           </box>
         );
       })}

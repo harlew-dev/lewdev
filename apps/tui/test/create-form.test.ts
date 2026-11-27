@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { SnapshotInfo } from "@lewdev/core";
+import { runtimeAvailabilityFromHealth, type SnapshotInfo } from "@lewdev/core";
 import { join, resolve } from "node:path";
 
 import {
@@ -8,6 +8,7 @@ import {
   type CreateFormValues,
   createFocusOrder,
   createLifecycleInput,
+  createRuntimeInput,
   createSizeInput,
   createSizeSummary,
   dockerfileFieldValue,
@@ -19,11 +20,17 @@ import {
   IMAGE_MENU_OPTIONS,
   imageOptionIndex,
   menuOptionAt,
+  moveRuntimeChoice,
   moveSize,
   nextCreateFocus,
   nextMenuIndex,
   pastedDockerfileLines,
   resolveDockerfilePath,
+  runtimeHint,
+  runtimeRowOptions,
+  runtimeUnavailableSummary,
+  runtimeUnknownNote,
+  RUNTIME_CHOICES,
   selectImageOption,
   selectSnapshotOption,
   SIZE_PRESETS,
@@ -31,6 +38,7 @@ import {
   STOP_IDLE_CHOICES,
   toggleDockerfileMode,
   toggleStopIdle,
+  UNKNOWN_RUNTIME_REPORT,
 } from "../src/create-form";
 
 function values(overrides: Partial<CreateFormValues> = {}): CreateFormValues {
@@ -149,9 +157,99 @@ describe("idle stop choice", () => {
   });
 });
 
+describe("runtime choice", () => {
+  test("defaults to Default and sends no runtime", () => {
+    expect(CREATE_DEFAULT.runtime).toBe("default");
+    expect(createRuntimeInput(values())).toBeUndefined();
+    expect(createRuntimeInput(values({ runtime: "gvisor" }))).toBe("gvisor");
+  });
+
+  test("offers Default, Docker, gVisor and Firecracker in order", () => {
+    expect(RUNTIME_CHOICES.map((choice) => choice.label)).toEqual([
+      "Default",
+      "Docker",
+      "gVisor",
+      "Firecracker",
+    ]);
+  });
+
+  test("mutes off and unhealthy runtimes", () => {
+    const report = runtimeAvailabilityFromHealth({
+      docker: "ok",
+      gvisor: "disabled",
+      firecracker: "failed to start",
+    });
+    expect(runtimeRowOptions(report).map((option) => option.disabled)).toEqual([
+      undefined,
+      undefined,
+      true,
+      true,
+    ]);
+  });
+
+  test("skips muted runtimes in both directions and wraps", () => {
+    const report = runtimeAvailabilityFromHealth({
+      docker: "ok",
+      gvisor: "disabled",
+      firecracker: "failed to start",
+    });
+    expect(moveRuntimeChoice("default", 1, report)).toBe("docker");
+    expect(moveRuntimeChoice("docker", 1, report)).toBe("default");
+    expect(moveRuntimeChoice("default", -1, report)).toBe("docker");
+
+    const all = runtimeAvailabilityFromHealth({
+      docker: "ok",
+      gvisor: "ok",
+      firecracker: "ok",
+    });
+    expect(moveRuntimeChoice("docker", 1, all)).toBe("gvisor");
+    expect(moveRuntimeChoice("firecracker", 1, all)).toBe("default");
+  });
+
+  test("keeps unknown runtimes selectable and explains why", () => {
+    const options = runtimeRowOptions(UNKNOWN_RUNTIME_REPORT);
+    expect(options.every((option) => option.disabled === undefined)).toBe(true);
+    expect(runtimeUnknownNote("default", UNKNOWN_RUNTIME_REPORT)).toBeNull();
+    expect(runtimeUnknownNote("gvisor", UNKNOWN_RUNTIME_REPORT)).toBe(
+      "This server doesn't report gVisor; the create fails if it isn't enabled.",
+    );
+    expect(
+      runtimeUnknownNote(
+        "gvisor",
+        runtimeAvailabilityFromHealth({ docker: "ok", gvisor: "ok", firecracker: "ok" }),
+      ),
+    ).toBeNull();
+  });
+
+  test("hints at the boot time and gVisor caveats", () => {
+    expect(runtimeHint("firecracker")).toContain("10–60 seconds");
+    expect(runtimeHint("gvisor")).toContain("disk quotas");
+    expect(runtimeHint("gvisor")).toContain("GPUs");
+  });
+
+  test("summarizes the unavailable runtimes in one line", () => {
+    const report = runtimeAvailabilityFromHealth({
+      docker: "ok",
+      gvisor: "disabled",
+      firecracker: "failed to start",
+    });
+    expect(runtimeUnavailableSummary(report)).toBe(
+      "gVisor: disabled · Firecracker: failed to start",
+    );
+    expect(runtimeUnavailableSummary(UNKNOWN_RUNTIME_REPORT)).toBeNull();
+  });
+});
+
 describe("focus order", () => {
-  test("visits image, size, idle stop and name for presets", () => {
-    expect(createFocusOrder(values())).toEqual(["image", "size", "stop-idle", "name", "submit"]);
+  test("visits image, size, runtime, idle stop and name for presets", () => {
+    expect(createFocusOrder(values())).toEqual([
+      "image",
+      "size",
+      "runtime",
+      "stop-idle",
+      "name",
+      "submit",
+    ]);
   });
 
   test("adds the image sub-field when a custom image or Dockerfile is picked", () => {
@@ -159,6 +257,7 @@ describe("focus order", () => {
       "image",
       "image-ref",
       "size",
+      "runtime",
       "stop-idle",
       "name",
       "submit",
@@ -168,6 +267,7 @@ describe("focus order", () => {
       "image-dockerfile-mode",
       "image-dockerfile",
       "size",
+      "runtime",
       "stop-idle",
       "name",
       "submit",
@@ -176,6 +276,7 @@ describe("focus order", () => {
       "image",
       "image-snapshot",
       "size",
+      "runtime",
       "stop-idle",
       "name",
       "submit",
@@ -195,6 +296,7 @@ describe("focus order", () => {
       "size-cpu",
       "size-memory",
       "size-disk",
+      "runtime",
       "stop-idle",
       "name",
       "submit",

@@ -1,3 +1,4 @@
+import type { RuntimeAvailabilityReport } from "@lewdev/core";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef } from "react";
@@ -12,6 +13,10 @@ import {
   IMAGE_MENU_OPTIONS,
   imageFieldValue,
   imageOptionIndex,
+  runtimeHint,
+  runtimeRowOptions,
+  runtimeUnavailableSummary,
+  runtimeUnknownNote,
   SIZE_CHOICES,
   sizePreset,
   snapshotOptionIndex,
@@ -28,6 +33,7 @@ interface CreateScreenProps {
   snapshotMenuOpen: boolean;
   snapshotMenuIndex: number;
   snapshotMenuOptions: ImageOption[];
+  runtimeAvailability: RuntimeAvailabilityReport;
   error: string | null;
 }
 
@@ -41,6 +47,7 @@ const FOCUS_IDS: Record<CreateFocus, string> = {
   "size-cpu": "create-size-cpu",
   "size-memory": "create-size-memory",
   "size-disk": "create-size-disk",
+  runtime: "create-runtime",
   "stop-idle": "create-stop-idle",
   name: "create-name",
   submit: "create-submit",
@@ -110,6 +117,7 @@ export function CreateScreen({
   snapshotMenuOpen,
   snapshotMenuIndex,
   snapshotMenuOptions,
+  runtimeAvailability,
   error,
 }: CreateScreenProps) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
@@ -139,6 +147,10 @@ export function CreateScreen({
   const dockerfileHint =
     values.imageSource === "dockerfile" &&
     "Built on the server. COPY/ADD of local files needs build-context support on the server.";
+  const runtimeOptions = runtimeRowOptions(runtimeAvailability);
+  const runtimeHintText = runtimeHint(values.runtime);
+  const runtimeUnknown = runtimeUnknownNote(values.runtime, runtimeAvailability);
+  const runtimeUnavailable = runtimeUnavailableSummary(runtimeAvailability);
 
   return (
     <scrollbox ref={scrollRef} flexGrow={1} flexShrink={1} width="100%" scrollY>
@@ -313,6 +325,30 @@ export function CreateScreen({
               </box>
             </>
           ) : null}
+
+          <box id="create-runtime" flexDirection="column" gap={0}>
+            <SegmentedRow
+              label="Runtime"
+              options={runtimeOptions}
+              selected={values.runtime}
+              active={focus === "runtime"}
+            />
+            <box flexDirection="column" paddingTop={1}>
+              <text fg={colors.muted} wrapMode="word">
+                {runtimeHintText}
+              </text>
+              {runtimeUnknown ? (
+                <text fg={colors.muted} wrapMode="word">
+                  {runtimeUnknown}
+                </text>
+              ) : null}
+              {runtimeUnavailable ? (
+                <text fg={colors.muted} wrapMode="word">
+                  {runtimeUnavailable}
+                </text>
+              ) : null}
+            </box>
+          </box>
 
           <box id="create-stop-idle">
             <SegmentedRow
