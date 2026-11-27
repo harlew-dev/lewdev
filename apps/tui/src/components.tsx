@@ -444,10 +444,11 @@ export function UsageBar({
   );
 }
 
-export function HomeTabs({ active }: { active: "sandboxes" | "snapshots" }) {
+export function HomeTabs({ active }: { active: "sandboxes" | "snapshots" | "account" }) {
   const tabs = [
     { id: "sandboxes" as const, label: "Sandboxes" },
     { id: "snapshots" as const, label: "Snapshots" },
+    { id: "account" as const, label: "Account" },
   ];
   return (
     <box flexDirection="row" flexShrink={0} gap={1}>

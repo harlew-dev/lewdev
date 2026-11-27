@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ACCOUNT_PAGE,
   backFromTerminal,
   breadcrumbTrail,
   currentPage,
+  nextHomePage,
   pageSandbox,
   type Page,
   popPage,
@@ -40,6 +42,7 @@ describe("page stack", () => {
     expect(pageSandbox(ROOT_PAGE)).toBeNull();
     expect(pageSandbox(SNAPSHOTS_PAGE)).toBeNull();
     expect(pageSandbox({ kind: "connect" })).toBeNull();
+    expect(pageSandbox(ACCOUNT_PAGE)).toBeNull();
     expect(pageSandbox({ kind: "new-sandbox" })).toBeNull();
     expect(pageSandbox({ kind: "new-snapshot" })).toBeNull();
     expect(pageSandbox({ kind: "snapshot", name: "base" })).toBeNull();
@@ -146,6 +149,18 @@ describe("breadcrumbs", () => {
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "audit-log", ...myBox })),
     ).toEqual(["Sandboxes", "my-box", "Audit log"]);
+  });
+
+  test("names the Account tab", () => {
+    expect(breadcrumbTrail([ACCOUNT_PAGE])).toEqual(["Account"]);
+  });
+
+  test("cycles the three home tabs in both directions", () => {
+    expect(nextHomePage("sandboxes")).toEqual(SNAPSHOTS_PAGE);
+    expect(nextHomePage("snapshots")).toEqual(ACCOUNT_PAGE);
+    expect(nextHomePage("account")).toEqual(ROOT_PAGE);
+    expect(nextHomePage("sandboxes", -1)).toEqual(ACCOUNT_PAGE);
+    expect(nextHomePage("snapshots", -1)).toEqual(ROOT_PAGE);
   });
 
   test("names the snapshot tab and pages", () => {

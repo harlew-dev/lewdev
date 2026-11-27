@@ -6,6 +6,7 @@ export interface SandboxPageTarget {
 export type Page =
   | { kind: "sandboxes" }
   | { kind: "snapshots" }
+  | { kind: "account" }
   | { kind: "connect" }
   | { kind: "new-sandbox" }
   | { kind: "new-snapshot" }
@@ -48,10 +49,25 @@ export type Page =
 
 export const ROOT_PAGE: Page = { kind: "sandboxes" };
 export const SNAPSHOTS_PAGE: Page = { kind: "snapshots" };
+export const ACCOUNT_PAGE: Page = { kind: "account" };
+
+/** The three home tabs, in the order `tab` visits them. */
+export const HOME_PAGES = [ROOT_PAGE, SNAPSHOTS_PAGE, ACCOUNT_PAGE] as const;
+
+export type HomeTab = (typeof HOME_PAGES)[number]["kind"];
+
+/** Cycles the home tabs. `delta` is 1 for tab, -1 for shift+tab. */
+export function nextHomePage(current: HomeTab, delta = 1): Page {
+  const index = HOME_PAGES.findIndex((page) => page.kind === current);
+  const base = Math.max(index, 0);
+  const next = (base + delta + HOME_PAGES.length) % HOME_PAGES.length;
+  return HOME_PAGES[next] ?? ROOT_PAGE;
+}
 
 const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   sandboxes: "Sandboxes",
   snapshots: "Snapshots",
+  account: "Account",
   connect: "Connect",
   "new-sandbox": "New sandbox",
   "new-snapshot": "New snapshot",
@@ -119,6 +135,7 @@ export function pageSandbox(page: Page): SandboxPageTarget | null {
   switch (page.kind) {
     case "sandboxes":
     case "snapshots":
+    case "account":
     case "connect":
     case "new-sandbox":
     case "new-snapshot":

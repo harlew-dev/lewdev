@@ -2,15 +2,20 @@ import {
   type AccountInfo,
   addAuthorizedKey,
   addSshInclude,
+  type ApiTokenInfo,
   type AuditCoverageInfo,
   type AuditEventInfo,
   type AuthorizedKey,
   backgroundUpdateCheck,
   cleanupDirectSsh,
   completeRemotePath,
+  type ConfigSource,
   type CreateSandboxInput,
+  type CreatedApiToken,
   type CustomDomainInfo,
+  DEFAULT_PROFILE,
   deletePrivateKey,
+  deleteProfile,
   defaultDownloadFolder,
   describeError,
   describeFileError,
@@ -46,15 +51,18 @@ import {
   isSshdRunning,
   knownHostsEntry,
   LewdevApi,
+  listProfiles,
   type LewdevConfig,
   loadConfig,
   normalizeApiUrl,
+  normalizeProfileName,
   normalizeRemotePath,
   type NetworkUsageInfo,
   joinRemotePath,
   parentRemotePath,
   prepareDownloadDestination,
   privateKeyExists,
+  type ProfileSummary,
   readAuthorizedKeys,
   readDirectPublicKey,
   readDirectSshConfigBlock,
@@ -69,6 +77,7 @@ import {
   saveGatewayHostKeys,
   savePrivateKey,
   scanGatewayHostKeys,
+  setActiveProfile as persistActiveProfile,
   setupDirectSsh,
   type SnapshotInfo,
   SSH_PORT,
@@ -82,6 +91,7 @@ import {
   uploadFileFromPath,
   uploadFolderFromPath,
   type UsageSummary,
+  validateCreateApiToken,
 } from "@lewdev/core";
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
@@ -136,6 +146,22 @@ import {
   nextActionId,
   type PageAction,
 } from "./actions";
+import {
+  accountRowSelection,
+  canListApiTokens,
+  canManageApiTokens,
+  defaultTokenForm,
+  defaultTokenTeam,
+  nextTokenFormField,
+  profileBlockReason,
+  profileNameFromUrl,
+  TOKEN_EXPIRY_PRESETS,
+  TOKEN_ROLE_OPTIONS,
+  tokenAccessNote,
+  type TokenFormField,
+  type TokenFormValues,
+  tokenFormInput,
+} from "./account-view";
 import { readClipboard, writeClipboard } from "./clipboard";
 import {
   ALL_AUDIT_KINDS,
@@ -189,9 +215,11 @@ import {
   type SnapshotSortMode,
 } from "./list-view";
 import {
+  ACCOUNT_PAGE,
   backFromTerminal,
   breadcrumbTrail,
   currentPage,
+  nextHomePage,
   pageSandbox,
   type Page,
   popPage,
@@ -201,6 +229,7 @@ import {
   type SandboxPageTarget,
   SNAPSHOTS_PAGE,
 } from "./navigation";
+import { AccountScreen, ProfileSwitcherPanel } from "./screens/account";
 import { type ConnectField, type ConnectFormState, ConnectScreen } from "./screens/connect";
 import {
   buildSnapshotMenuOptions,
@@ -311,6 +340,18 @@ import { VERSION } from "./version";
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
 
+/** A profile name taken from a new token's name, or empty when it does not fit the rules. */
+function suggestTokenProfileName(tokenName: string | undefined): string {
+  if (!tokenName) {
+    return "";
+  }
+  try {
+    return normalizeProfileName(tokenName.replace(/\./g, "-").slice(0, 32));
+  } catch {
+    return "";
+  }
+}
+
 /** Shown when the server answers 412 because custom domains are switched off. */
 const CUSTOM_DOMAINS_OFF =
   "Custom domains are not enabled on this AerolVM server. Ask its operator to turn them on.";
@@ -322,7 +363,7 @@ function isHelpKey(key: KeyEvent): boolean {
   return !key.ctrl && !key.meta && (key.sequence === "?" || key.name === "?");
 }
 
-const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "submit"];
+const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["profile", "url", "token", "submit"];
 const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = ["name", "submit"];
 
 function emptySetupSteps(): SetupSteps {
@@ -457,11 +498,39 @@ export function App() {
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [accountError, setAccountError] = useState<string | null>(null);
   const [teamQuota, setTeamQuota] = useState<TeamQuotaInfo | null>(null);
   const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
 
-  const [connectForm, setConnectForm] = useState<ConnectFormState>({ url: "", token: "" });
-  const [connectField, setConnectField] = useState<ConnectField>("url");
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [activeProfile, setActiveProfile] = useState<string | null>(null);
+  const [configSource, setConfigSource] = useState<ConfigSource | null>(null);
+  const [profileSwitcherOpen, setProfileSwitcherOpen] = useState(false);
+  const [profileSwitcherIndex, setProfileSwitcherIndex] = useState(0);
+  const [accountRow, setAccountRow] = useState(0);
+  const [apiTokens, setApiTokens] = useState<ApiTokenInfo[]>([]);
+  const [apiTokensLoading, setApiTokensLoading] = useState(false);
+  const [apiTokensError, setApiTokensError] = useState<string | null>(null);
+  const [tokenForm, setTokenForm] = useState<TokenFormValues | null>(null);
+  const [tokenFocus, setTokenFocus] = useState<TokenFormField>("name");
+  const [tokenFormError, setTokenFormError] = useState<string | null>(null);
+  const [tokenCreating, setTokenCreating] = useState(false);
+  const [createdToken, setCreatedToken] = useState<CreatedApiToken | null>(null);
+  const [secretMode, setSecretMode] = useState<"secret" | "save-profile">("secret");
+  const [secretProfileName, setSecretProfileName] = useState("");
+  const [secretError, setSecretError] = useState<string | null>(null);
+  const [secretSaving, setSecretSaving] = useState(false);
+  const [deleteProfileName, setDeleteProfileName] = useState<string | null>(null);
+  const [revokeToken, setRevokeToken] = useState<ApiTokenInfo | null>(null);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
+
+  const [connectForm, setConnectForm] = useState<ConnectFormState>({
+    profile: "",
+    url: "",
+    token: "",
+  });
+  const [connectField, setConnectField] = useState<ConnectField>("profile");
+  const [connectProfileEdited, setConnectProfileEdited] = useState(false);
   const [connectBusy, setConnectBusy] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -601,6 +670,16 @@ export function App() {
   const sandboxTarget = pageSandbox(page);
   const sandboxId = sandboxTarget?.id ?? null;
   const sessionLogId = page.kind === "session-log" ? page.sessionId : null;
+  const tokensVisible = canListApiTokens(account?.role);
+  const canManageTokens = canManageApiTokens(account?.role);
+  const tokensNote = tokenAccessNote(account?.role);
+  const accountTokens = useMemo(() => (tokensVisible ? apiTokens : []), [apiTokens, tokensVisible]);
+  const accountSelection = useMemo(
+    () => accountRowSelection(profiles, accountTokens, accountRow),
+    [profiles, accountTokens, accountRow],
+  );
+  const profileBlocked = useMemo(() => profileBlockReason(configSource), [configSource]);
+  const headerProfile = configSource === "env" || configSource === "mixed" ? "env" : activeProfile;
   const usesDetails =
     page.kind === "sandbox" ||
     page.kind === "resize" ||
@@ -1007,10 +1086,20 @@ export function App() {
         }
         setConfigPath(loaded.configPath);
         setConfig(loaded.config);
+        setProfiles(loaded.profiles);
+        setActiveProfile(loaded.profile);
+        setConfigSource(loaded.source);
         if (loaded.config) {
           setApi(LewdevApi.fromConfig(loaded.config));
           setStack([ROOT_PAGE]);
         } else {
+          setConnectForm({
+            profile: loaded.profile ?? DEFAULT_PROFILE,
+            url: "",
+            token: "",
+          });
+          setConnectField("profile");
+          setConnectProfileEdited(true);
           setStack(pushPage([ROOT_PAGE], { kind: "connect" }));
         }
       } catch (error) {
@@ -1034,22 +1123,26 @@ export function App() {
   useEffect(() => {
     if (!api) {
       setAccount(null);
+      setAccountError(null);
       setTeamQuota(null);
       return;
     }
     let cancelled = false;
     setAccount(null);
+    setAccountError(null);
     setTeamQuota(null);
     void api
       .whoami()
       .then((info) => {
         if (!cancelled) {
           setAccount(info);
+          setAccountError(null);
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!cancelled) {
           setAccount(null);
+          setAccountError(describeError(error));
           setTeamQuota(null);
         }
       });
@@ -1059,10 +1152,54 @@ export function App() {
   }, [api]);
 
   useEffect(() => {
-    if (!api || page.kind !== "sandboxes") {
+    setApiTokens([]);
+    setApiTokensError(null);
+    setApiTokensLoading(false);
+    if (!api || !tokensVisible) {
+      return;
+    }
+    let cancelled = false;
+    setApiTokensLoading(true);
+    void api
+      .listApiTokens()
+      .then((items) => {
+        if (!cancelled) {
+          setApiTokens(items);
+          setApiTokensError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setApiTokens([]);
+          setApiTokensError(describeError(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setApiTokensLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, tokensVisible]);
+
+  useEffect(() => {
+    const count = profiles.length + accountTokens.length;
+    setAccountRow((previous) => (count === 0 ? 0 : Math.min(previous, count - 1)));
+  }, [profiles.length, accountTokens.length]);
+
+  useEffect(() => {
+    if (
+      !api ||
+      (page.kind !== "sandboxes" && page.kind !== "snapshots" && page.kind !== "account")
+    ) {
       return;
     }
     void refreshList(!hasSandboxes.current);
+    if (page.kind !== "sandboxes") {
+      return;
+    }
     const timer = setInterval(() => {
       void refreshList(false);
     }, 3000);
@@ -1213,7 +1350,10 @@ export function App() {
       setTeamQuota(null);
       return;
     }
-    if (!api || (page.kind !== "sandboxes" && page.kind !== "snapshots")) {
+    if (
+      !api ||
+      (page.kind !== "sandboxes" && page.kind !== "snapshots" && page.kind !== "account")
+    ) {
       return;
     }
     let cancelled = false;
@@ -1291,6 +1431,15 @@ export function App() {
     setAuthorizedKeysError(null);
     setSshKeySelected(0);
   }, [sandboxId]);
+
+  // A new token's secret is shown once. Leaving the Account tab closes that
+  // panel and drops the secret from memory.
+  const onAccount = page.kind === "account";
+  useEffect(() => {
+    if (!onAccount) {
+      setCreatedToken(null);
+    }
+  }, [onAccount]);
 
   const onSshSettings = page.kind === "ssh-details";
   useEffect(() => {
@@ -1475,6 +1624,8 @@ export function App() {
         return buildSandboxListActions();
       case "snapshots":
         return buildSnapshotListActions();
+      case "account":
+        return [];
       case "sandbox":
         return buildSandboxPageActions(ctx);
       case "resize":
@@ -2198,9 +2349,10 @@ export function App() {
           },
         }));
       };
+      const profile = activeProfile === null ? {} : { profile: activeProfile };
       const result = options.reset
-        ? await resetDirectSsh(api, target.id, { onProgress, mode })
-        : await setupDirectSsh(api, target.id, { onProgress, mode });
+        ? await resetDirectSsh(api, target.id, { onProgress, mode, ...profile })
+        : await setupDirectSsh(api, target.id, { onProgress, mode, ...profile });
       setSetupResult(result);
       if (guided) {
         // The sandbox action that started this flow no longer exists once SSH is
@@ -2247,7 +2399,11 @@ export function App() {
     }
     setBusyMessage("Enabling public TCP SSH…");
     try {
-      await enablePublicDirectSsh(api, target.id);
+      await enablePublicDirectSsh(
+        api,
+        target.id,
+        activeProfile === null ? {} : { profile: activeProfile },
+      );
       await loadDetails(target.id);
       await refreshDirectSshState(target.id, true);
       setSelectedActionId(null);
@@ -2267,7 +2423,11 @@ export function App() {
     }
     setBusyMessage("Switching SSH to the private connection…");
     try {
-      await switchToPrivateSsh(api, target.id);
+      await switchToPrivateSsh(
+        api,
+        target.id,
+        activeProfile === null ? {} : { profile: activeProfile },
+      );
       await loadDetails(target.id);
       await refreshDirectSshState(target.id, true);
       setSelectedActionId(null);
@@ -3390,11 +3550,727 @@ export function App() {
     }
   }
 
+  function clearServerUiState(): void {
+    try {
+      terminalSession.current?.detach();
+    } catch {
+      // The attach stream already closed.
+    }
+    terminalSession.current = null;
+    setAccount(null);
+    setAccountError(null);
+    setTeamQuota(null);
+    setApiTokens([]);
+    setApiTokensLoading(false);
+    setApiTokensError(null);
+    setTokenForm(null);
+    setTokenFocus("name");
+    setTokenFormError(null);
+    setTokenCreating(false);
+    setCreatedToken(null);
+    setSecretMode("secret");
+    setSecretProfileName("");
+    setSecretError(null);
+    setSecretSaving(false);
+    setDeleteProfileName(null);
+    setRevokeToken(null);
+    setRevokeError(null);
+    setProfileSwitcherOpen(false);
+    setProfileSwitcherIndex(0);
+    setAccountRow(0);
+
+    setSandboxes([]);
+    setSandboxSelection(null);
+    setSandboxFilter("");
+    setSandboxSort("newest");
+    setFilterEditing(false);
+    setListLoading(false);
+    setListError(null);
+    setSnapshots([]);
+    setSnapshotSelection(null);
+    setSnapshotFilter("");
+    setSnapshotSort("newest");
+    setSnapshotsLoading(false);
+    setSnapshotsError(null);
+    setSnapshotsLoaded(false);
+    setSnapshotDetails(null);
+    setSnapshotDetailsLoading(false);
+    setSnapshotDetailsError(null);
+    setDetails(null);
+    setDetailsLoading(false);
+    setDetailsError(null);
+    setKeyAvailable(false);
+    setPortSelected(0);
+    setPortForm(null);
+    setPortFormError(null);
+    setProtocolMenuOpen(false);
+    setProtocolMenuIndex(0);
+    setVisibilityMenuOpen(false);
+    setVisibilityMenuIndex(0);
+    setSelectedActionId(null);
+    sandboxActionRef.current = null;
+    setCustomDomains([]);
+    setCustomDomainsLoading(false);
+    setCustomDomainsError(null);
+    setDomainSelected(0);
+    setDomainForm(CUSTOM_DOMAIN_DEFAULT);
+    setDomainFocus("hostname");
+    setDomainFormError(null);
+    setDomainAdded(false);
+    setDomainRecords([]);
+    setDomainTarget(null);
+    setDomainRecordsLoading(false);
+    setDomainRecordsError(null);
+    setRemoveDomainError(null);
+    setNetworkUsage(null);
+    setNetworkUsageLoading(false);
+    setNetworkUsageError(null);
+    setNetworkLimitsValues(null);
+    setNetworkLimitsFocus("in-unit");
+    setNetworkLimitsWarning(null);
+    setNetworkLimitsError(null);
+    setAuditEvents([]);
+    setAuditCoverage(null);
+    setAuditNextCursor(undefined);
+    setAuditKind(null);
+    setAuditKinds([]);
+    setAuditSelected(0);
+    setAuditLoading(false);
+    setAuditLoadingMore(false);
+    setAuditError(null);
+    setAuditKindMenuOpen(false);
+    setAuditKindMenuIndex(0);
+    setTerminalStatus(null);
+    setSessions([]);
+    setSessionsLoading(false);
+    setSessionsError(null);
+    setSessionSelected(0);
+    setSessionLogLines([]);
+    setSessionLogLoading(false);
+    setSessionLogError(null);
+    setKillSessionError(null);
+    setHostKeyScan(null);
+    setDirectInfo(null);
+    setAuthorizedKeys([]);
+    setAuthorizedKeysLoading(false);
+    setAuthorizedKeysError(null);
+    setSetupSteps(emptySetupSteps());
+    setSetupRunning(false);
+    setSetupGuided(false);
+    setSetupMode("private");
+    setSetupError(null);
+    setSetupResult(null);
+    setNewSshKey("");
+    setAddSshKeyError(null);
+    setSshKeySelected(0);
+    setRemoveSshKeyError(null);
+    setVscodeDir(EMPTY_VSCODE_DIR);
+    lastVscodeDir.current = {};
+    setFiles(initialFilesState());
+    lastFilesDir.current = {};
+    filesRequestId.current += 1;
+  }
+
   function openConnect(): void {
-    setConnectForm({ url: config?.apiUrl ?? "", token: config?.apiToken ?? "" });
-    setConnectField("url");
+    setConnectForm({
+      profile: activeProfile ?? DEFAULT_PROFILE,
+      url: config?.apiUrl ?? "",
+      token: config?.apiToken ?? "",
+    });
+    setConnectField("profile");
+    setConnectProfileEdited(true);
     setConnectError(null);
     push({ kind: "connect" });
+  }
+
+  function openAddProfile(): void {
+    if (profileBlocked) {
+      showToast("info", profileBlocked);
+      return;
+    }
+    setConnectForm({ profile: "", url: "", token: "" });
+    setConnectField("url");
+    setConnectProfileEdited(false);
+    setConnectError(null);
+    push({ kind: "connect" });
+  }
+
+  function setConnectValue(field: "profile" | "url" | "token", value: string): void {
+    if (field === "profile") {
+      setConnectProfileEdited(true);
+    }
+    setConnectForm((previous) => {
+      const next = { ...previous, [field]: value };
+      if (field === "url" && !connectProfileEdited) {
+        const suggestion = profileNameFromUrl(value);
+        if (suggestion) {
+          next.profile = suggestion;
+        }
+      }
+      return next;
+    });
+  }
+
+  async function switchProfile(name: string): Promise<void> {
+    if (profileBlocked) {
+      showToast("info", profileBlocked);
+      return;
+    }
+    if (busyMessage || connectBusy || setupRunning) {
+      return;
+    }
+    if (activeProfile === name) {
+      setProfileSwitcherOpen(false);
+      showToast("info", `Already using profile ${name}.`);
+      return;
+    }
+    const destination =
+      page.kind === "snapshots"
+        ? SNAPSHOTS_PAGE
+        : page.kind === "account"
+          ? ACCOUNT_PAGE
+          : ROOT_PAGE;
+    setBusyMessage(`Switching to ${name}…`);
+    try {
+      await persistActiveProfile(name);
+      const loaded = await loadConfig(process.env, { profile: name });
+      clearServerUiState();
+      setConfigPath(loaded.configPath);
+      setProfiles(loaded.profiles);
+      setActiveProfile(loaded.profile ?? name);
+      setConfigSource(loaded.source);
+      setConfig(loaded.config);
+      setApi(loaded.config ? LewdevApi.fromConfig(loaded.config) : null);
+      if (loaded.config) {
+        setStack([destination]);
+        showToast("success", `Switched to profile ${loaded.profile ?? name}.`);
+      } else {
+        setConnectForm({
+          profile: loaded.profile ?? name,
+          url: "",
+          token: "",
+        });
+        setConnectField("profile");
+        setConnectProfileEdited(true);
+        setConnectError(null);
+        setStack([ROOT_PAGE, { kind: "connect" }]);
+        showToast("info", `Profile ${name} has no saved token. Connect to it again.`);
+      }
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  async function performDeleteProfile(): Promise<void> {
+    const name = deleteProfileName;
+    if (!name) {
+      return;
+    }
+    if (profileBlocked) {
+      setDeleteProfileName(null);
+      showToast("info", profileBlocked);
+      return;
+    }
+    const wasActive = activeProfile === name;
+    setBusyMessage(`Deleting profile ${name}…`);
+    try {
+      await deleteProfile(name);
+      const loaded = await loadConfig();
+      setConfigPath(loaded.configPath);
+      setProfiles(loaded.profiles);
+      setActiveProfile(loaded.profile);
+      setConfigSource(loaded.source);
+      if (loaded.config) {
+        setConfig(loaded.config);
+        if (wasActive) {
+          clearServerUiState();
+          setApi(LewdevApi.fromConfig(loaded.config));
+          setStack([ACCOUNT_PAGE]);
+          showToast(
+            "success",
+            loaded.profile
+              ? `Deleted profile ${name}. Switched to ${loaded.profile}.`
+              : `Deleted profile ${name}.`,
+          );
+        } else {
+          showToast("success", `Deleted profile ${name}.`);
+        }
+      } else {
+        setConfig(null);
+        clearServerUiState();
+        setApi(null);
+        setConnectForm({ profile: DEFAULT_PROFILE, url: "", token: "" });
+        setConnectField("profile");
+        setConnectProfileEdited(true);
+        setConnectError(null);
+        setStack([ROOT_PAGE, { kind: "connect" }]);
+        showToast("success", `Deleted the last profile ${name}. Connect to a server again.`);
+      }
+    } catch (error) {
+      showToast("error", describeError(error));
+    } finally {
+      setDeleteProfileName(null);
+      setBusyMessage(null);
+    }
+  }
+
+  function openProfileSwitcher(): void {
+    if (profileBlocked) {
+      showToast("info", profileBlocked);
+      return;
+    }
+    if (profiles.length === 0) {
+      showToast("info", "No profiles are saved. Add one on the Account tab.");
+      return;
+    }
+    const index = profiles.findIndex((profile) => profile.name === activeProfile);
+    setProfileSwitcherIndex(Math.max(index, 0));
+    setProfileSwitcherOpen(true);
+  }
+
+  function handleProfileSwitcherKey(key: KeyEvent): void {
+    const pressed = actionKey(key);
+    if (key.name === "down" || pressed === "j") {
+      setProfileSwitcherIndex((index) => Math.min(index + 1, Math.max(0, profiles.length - 1)));
+      return;
+    }
+    if (key.name === "up" || pressed === "k") {
+      setProfileSwitcherIndex((index) => Math.max(index - 1, 0));
+      return;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      key.preventDefault();
+      const profile = profiles[profileSwitcherIndex];
+      if (profile) {
+        void switchProfile(profile.name);
+      }
+      return;
+    }
+    if (key.name === "escape" || pressed === "p") {
+      key.preventDefault();
+      setProfileSwitcherOpen(false);
+      return;
+    }
+    if (key.name === "tab" || key.name === "backtab") {
+      key.preventDefault();
+      setProfileSwitcherOpen(false);
+      const delta = key.name === "backtab" || key.shift ? -1 : 1;
+      const currentTab = page.kind === "snapshots" ? "snapshots" : "sandboxes";
+      setStack([nextHomePage(currentTab, delta)]);
+      return;
+    }
+    if (pressed === "1" || pressed === "2" || pressed === "3") {
+      setProfileSwitcherOpen(false);
+      setStack([pressed === "1" ? ROOT_PAGE : pressed === "2" ? SNAPSHOTS_PAGE : ACCOUNT_PAGE]);
+    }
+  }
+
+  function openTokenForm(): void {
+    if (!account) {
+      showToast("info", "The account role is still loading.");
+      return;
+    }
+    if (!canManageTokens) {
+      showToast("info", tokenAccessNote(account.role) ?? "Creating tokens needs the admin role.");
+      return;
+    }
+    setCreatedToken(null);
+    setSecretMode("secret");
+    setSecretProfileName("");
+    setSecretError(null);
+    setTokenForm(defaultTokenForm(account));
+    setTokenFocus("name");
+    setTokenFormError(null);
+    setRevokeToken(null);
+  }
+
+  async function submitTokenForm(): Promise<void> {
+    if (!api || !tokenForm || tokenCreating) {
+      return;
+    }
+    let input: ReturnType<typeof tokenFormInput>;
+    try {
+      input = tokenFormInput(tokenForm);
+      validateCreateApiToken(input);
+    } catch (error) {
+      setTokenFormError(describeError(error));
+      return;
+    }
+    setTokenFormError(null);
+    setTokenCreating(true);
+    try {
+      const created = await api.createApiToken(input);
+      setCreatedToken(created);
+      setSecretMode("secret");
+      setSecretProfileName(suggestTokenProfileName(created.token.name));
+      setSecretError(null);
+      setTokenForm(null);
+      setTokenFocus("name");
+      void api
+        .listApiTokens()
+        .then((items) => {
+          setApiTokens(items);
+          setApiTokensError(null);
+        })
+        .catch((error: unknown) => {
+          setApiTokensError(describeError(error));
+        });
+      showToast("success", `Created token ${created.token.name}.`);
+    } catch (error) {
+      setTokenFormError(describeError(error));
+    } finally {
+      setTokenCreating(false);
+    }
+  }
+
+  async function copyCreatedToken(): Promise<void> {
+    if (!createdToken) {
+      return;
+    }
+    const copied = await writeClipboard(createdToken.secret).catch(() => false);
+    showToast(
+      copied ? "success" : "error",
+      copied
+        ? "Copied the token secret."
+        : "Couldn't copy the token secret. Use your terminal's copy.",
+    );
+  }
+
+  function beginSaveSecretProfile(): void {
+    if (!createdToken) {
+      return;
+    }
+    if (profileBlocked) {
+      setSecretError(profileBlocked);
+      return;
+    }
+    setSecretMode("save-profile");
+    setSecretProfileName(suggestTokenProfileName(createdToken?.token.name));
+    setSecretError(null);
+  }
+
+  async function submitSecretProfile(): Promise<void> {
+    if (!createdToken || !config || secretSaving) {
+      return;
+    }
+    if (profileBlocked) {
+      setSecretError(profileBlocked);
+      return;
+    }
+    let name: string;
+    try {
+      name = normalizeProfileName(secretProfileName);
+    } catch (error) {
+      setSecretError(describeError(error));
+      return;
+    }
+    if (profiles.some((profile) => profile.name === name)) {
+      // Saving here must never replace another profile's token.
+      setSecretError(`A profile named ${name} already exists. Choose another name.`);
+      return;
+    }
+    setSecretSaving(true);
+    setSecretError(null);
+    try {
+      await saveConfig({ apiUrl: config.apiUrl, apiToken: createdToken.secret }, process.env, {
+        profile: name,
+        activate: false,
+      });
+      setProfiles(await listProfiles());
+      setSecretMode("secret");
+      showToast(
+        "success",
+        `Saved profile ${name}. It stays inactive; switch to it from the Profiles list.`,
+      );
+    } catch (error) {
+      setSecretError(describeError(error));
+    } finally {
+      setSecretSaving(false);
+    }
+  }
+
+  function closeSecretPanel(): void {
+    setCreatedToken(null);
+    setSecretMode("secret");
+    setSecretProfileName("");
+    setSecretError(null);
+    setSecretSaving(false);
+  }
+
+  function openRevokeToken(token: ApiTokenInfo): void {
+    if (!canManageTokens) {
+      showToast("info", tokenAccessNote(account?.role) ?? "Revoking tokens needs the admin role.");
+      return;
+    }
+    setRevokeToken(token);
+    setRevokeError(null);
+  }
+
+  async function performRevokeToken(): Promise<void> {
+    const token = revokeToken;
+    if (!api || !token) {
+      return;
+    }
+    if (!canManageTokens) {
+      setRevokeToken(null);
+      showToast("info", tokenAccessNote(account?.role) ?? "Revoking tokens needs the admin role.");
+      return;
+    }
+    const ownToken = token.id === account?.principalId;
+    const apiUrl = config?.apiUrl ?? "";
+    const profileName = activeProfile ?? DEFAULT_PROFILE;
+    setBusyMessage(`Revoking token ${token.name}…`);
+    try {
+      await api.revokeApiToken(token.id);
+      setRevokeToken(null);
+      setRevokeError(null);
+      setApiTokens((items) => items.filter((item) => item.id !== token.id));
+      showToast("warning", `Revoked token ${token.name}.`);
+      if (ownToken) {
+        setConfig(null);
+        setApi(null);
+        clearServerUiState();
+        setConnectForm({ profile: profileName, url: apiUrl, token: "" });
+        setConnectField("token");
+        setConnectProfileEdited(true);
+        setConnectError("This token was revoked. Enter a new token for this profile.");
+        setStack([ROOT_PAGE, { kind: "connect" }]);
+      }
+    } catch (error) {
+      setRevokeError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  function handleTokenFormKey(key: KeyEvent): void {
+    if (!tokenForm || tokenCreating) {
+      return;
+    }
+    if (key.name === "escape") {
+      key.preventDefault();
+      setTokenForm(null);
+      setTokenFormError(null);
+      return;
+    }
+    if (key.name === "tab" || key.name === "backtab" || key.name === "down" || key.name === "up") {
+      if (key.name === "tab" || key.name === "backtab") {
+        key.preventDefault();
+      }
+      const backward =
+        key.name === "backtab" || key.name === "up" || (key.name === "tab" && key.shift);
+      setTokenFocus((current) => nextTokenFormField(tokenForm, current, backward ? -1 : 1));
+      return;
+    }
+    if (
+      (tokenFocus === "role" || tokenFocus === "expiry") &&
+      (key.name === "left" || key.name === "right")
+    ) {
+      const delta = key.name === "left" ? -1 : 1;
+      if (tokenFocus === "role") {
+        setTokenForm((previous) => {
+          if (!previous) {
+            return previous;
+          }
+          const index = TOKEN_ROLE_OPTIONS.findIndex((option) => option.id === previous.role);
+          const next =
+            TOKEN_ROLE_OPTIONS[
+              (Math.max(index, 0) + delta + TOKEN_ROLE_OPTIONS.length) % TOKEN_ROLE_OPTIONS.length
+            ];
+          if (!next) {
+            return previous;
+          }
+          const role = next.id as TokenFormValues["role"];
+          const currentDefault = defaultTokenTeam(previous.role, account?.team);
+          return {
+            ...previous,
+            role,
+            team:
+              previous.team === currentDefault
+                ? defaultTokenTeam(role, account?.team)
+                : previous.team,
+          };
+        });
+      } else {
+        setTokenForm((previous) => {
+          if (!previous) {
+            return previous;
+          }
+          const index = TOKEN_EXPIRY_PRESETS.findIndex((option) => option.id === previous.expiry);
+          const next =
+            TOKEN_EXPIRY_PRESETS[
+              (Math.max(index, 0) + delta + TOKEN_EXPIRY_PRESETS.length) %
+                TOKEN_EXPIRY_PRESETS.length
+            ];
+          return next ? { ...previous, expiry: next.id } : previous;
+        });
+      }
+      setTokenFormError(null);
+      return;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      key.preventDefault();
+      if (tokenFocus !== "submit") {
+        setTokenFocus((current) => nextTokenFormField(tokenForm, current, 1));
+      } else {
+        void submitTokenForm();
+      }
+      return;
+    }
+    if (tokenFocus === "role" || tokenFocus === "expiry" || tokenFocus === "submit") {
+      return;
+    }
+    const field =
+      tokenFocus === "custom-expiry" ? "customExpiry" : tokenFocus === "name" ? "name" : "team";
+    if (key.name === "backspace" || key.name === "delete") {
+      setTokenForm((previous) =>
+        previous ? { ...previous, [field]: removeLastChar(previous[field]) } : previous,
+      );
+      setTokenFormError(null);
+      return;
+    }
+    const char = printableChar(key);
+    if (char) {
+      setTokenForm((previous) =>
+        previous ? { ...previous, [field]: appendText(previous[field], char) } : previous,
+      );
+      setTokenFormError(null);
+    }
+  }
+
+  function handleAccountKey(key: KeyEvent): void {
+    const pressed = actionKey(key);
+    if (textInputFocused() && pressed === "ctrl+v") {
+      key.preventDefault();
+      void pasteFromClipboard();
+      return;
+    }
+    if (deleteProfileName) {
+      if (key.name === "escape") {
+        key.preventDefault();
+        setDeleteProfileName(null);
+      } else if (key.name === "return" || key.name === "enter") {
+        key.preventDefault();
+        void performDeleteProfile();
+      }
+      return;
+    }
+    if (revokeToken) {
+      if (key.name === "escape") {
+        key.preventDefault();
+        setRevokeToken(null);
+        setRevokeError(null);
+      } else if (key.name === "return" || key.name === "enter") {
+        key.preventDefault();
+        void performRevokeToken();
+      }
+      return;
+    }
+    if (createdToken) {
+      if (secretMode === "save-profile") {
+        if (secretSaving) {
+          return;
+        }
+        if (key.name === "escape") {
+          key.preventDefault();
+          setSecretMode("secret");
+          setSecretError(null);
+          return;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          key.preventDefault();
+          void submitSecretProfile();
+          return;
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          setSecretProfileName((previous) => removeLastChar(previous));
+          setSecretError(null);
+          return;
+        }
+        const char = printableChar(key);
+        if (char) {
+          setSecretProfileName((previous) => appendText(previous, char));
+          setSecretError(null);
+        }
+        return;
+      }
+      if (pressed === "c") {
+        void copyCreatedToken();
+        return;
+      }
+      if (pressed === "s") {
+        beginSaveSecretProfile();
+        return;
+      }
+      if (key.name === "escape") {
+        key.preventDefault();
+        closeSecretPanel();
+      }
+      return;
+    }
+    if (tokenForm) {
+      handleTokenFormKey(key);
+      return;
+    }
+    if (key.name === "tab" || key.name === "backtab") {
+      key.preventDefault();
+      const delta = key.name === "backtab" || key.shift ? -1 : 1;
+      setStack([nextHomePage("account", delta)]);
+      return;
+    }
+    if (pressed === "1" || pressed === "2" || pressed === "3") {
+      setStack([pressed === "1" ? ROOT_PAGE : pressed === "2" ? SNAPSHOTS_PAGE : ACCOUNT_PAGE]);
+      return;
+    }
+    const count = profiles.length + accountTokens.length;
+    if (key.name === "down" || pressed === "j") {
+      if (count > 0) {
+        setAccountRow((previous) => Math.min(previous + 1, count - 1));
+      }
+      return;
+    }
+    if (key.name === "up" || pressed === "k") {
+      setAccountRow((previous) => Math.max(previous - 1, 0));
+      return;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      key.preventDefault();
+      if (accountSelection.profile) {
+        void switchProfile(accountSelection.profile.name);
+      } else if (accountSelection.token) {
+        openRevokeToken(accountSelection.token);
+      }
+      return;
+    }
+    if (pressed === "a") {
+      openAddProfile();
+      return;
+    }
+    if (pressed === "d") {
+      if (!accountSelection.profile) {
+        showToast("info", "Select a profile first.");
+        return;
+      }
+      if (profileBlocked) {
+        showToast("info", profileBlocked);
+        return;
+      }
+      setDeleteProfileName(accountSelection.profile.name);
+      return;
+    }
+    if (pressed === "t") {
+      openTokenForm();
+      return;
+    }
+    if (pressed === "r") {
+      if (!accountSelection.token) {
+        showToast("info", "Select a token first.");
+        return;
+      }
+      openRevokeToken(accountSelection.token);
+    }
   }
 
   function openCreate(): void {
@@ -3673,6 +4549,10 @@ export function App() {
       return;
     }
     setConnectError(null);
+    if (profileBlocked) {
+      setConnectError(profileBlocked);
+      return;
+    }
     const token = connectForm.token.trim();
     if (!connectForm.url.trim()) {
       setConnectError("API URL is required.");
@@ -3684,8 +4564,15 @@ export function App() {
     }
 
     let apiUrl: string;
+    let profile: string;
     try {
       apiUrl = normalizeApiUrl(connectForm.url);
+      const profileInput = connectForm.profile.trim() || profileNameFromUrl(apiUrl);
+      if (!profileInput) {
+        setConnectError("Profile name is required.");
+        return;
+      }
+      profile = normalizeProfileName(profileInput);
     } catch (error) {
       setConnectError(describeError(error));
       return;
@@ -3697,16 +4584,22 @@ export function App() {
       const health = await candidate.health();
       // health may not need auth; an authenticated call proves the token works.
       await candidate.listSandboxes();
-      const saved = await saveConfig({ apiUrl, apiToken: token });
+      const saved = await saveConfig({ apiUrl, apiToken: token }, process.env, { profile });
+      const loaded = await loadConfig();
+      clearServerUiState();
+      setConfigPath(loaded.configPath);
+      setProfiles(loaded.profiles);
+      setActiveProfile(loaded.profile ?? profile);
+      setConfigSource(loaded.source);
       setConfig(saved);
       setApi(LewdevApi.fromConfig(saved));
-      setSandboxes([]);
-      setSandboxSelection(null);
-      setListError(null);
-      setConnectForm({ url: "", token: "" });
-      setSelectedActionId(null);
+      setConnectForm({ profile: "", url: "", token: "" });
+      setConnectProfileEdited(false);
       setStack([ROOT_PAGE]);
-      showToast("success", `Connected to AerolVM ${health.version}.`);
+      showToast(
+        "success",
+        `Connected to AerolVM ${health.version} (profile ${loaded.profile ?? profile}).`,
+      );
     } catch (error) {
       setConnectError(describeError(error));
     } finally {
@@ -4247,6 +5140,8 @@ export function App() {
       case "sandboxes":
       case "snapshots":
         return filterEditing;
+      case "account":
+        return tokenForm !== null || (createdToken !== null && secretMode === "save-profile");
       case "connect":
         return connectField !== "submit";
       case "new-sandbox":
@@ -4390,14 +5285,33 @@ export function App() {
       return;
     }
 
+    if (page.kind === "account") {
+      if (tokenCreating || secretSaving) {
+        return;
+      }
+      if (createdToken && secretMode === "save-profile") {
+        setSecretProfileName((previous) => appendText(previous, text));
+        setSecretError(null);
+        return;
+      }
+      if (tokenForm) {
+        if (tokenFocus === "role" || tokenFocus === "expiry" || tokenFocus === "submit") {
+          return;
+        }
+        const field =
+          tokenFocus === "custom-expiry" ? "customExpiry" : tokenFocus === "name" ? "name" : "team";
+        setTokenForm((previous) =>
+          previous ? { ...previous, [field]: appendText(previous[field], text) } : previous,
+        );
+        setTokenFormError(null);
+      }
+      return;
+    }
     if (page.kind === "connect") {
       if (connectField === "submit") {
         return;
       }
-      setConnectForm((previous) => ({
-        ...previous,
-        [connectField]: appendText(previous[connectField], text),
-      }));
+      setConnectValue(connectField, appendText(connectForm[connectField], text));
       return;
     }
     if (page.kind === "new-sandbox") {
@@ -4584,6 +5498,16 @@ export function App() {
       return;
     }
 
+    if (profileSwitcherOpen && (page.kind === "sandboxes" || page.kind === "snapshots")) {
+      handleProfileSwitcherKey(key);
+      return;
+    }
+
+    if (page.kind === "account") {
+      handleAccountKey(key);
+      return;
+    }
+
     if (page.kind === "vscode-directory") {
       if (vscodeDir.loading) {
         if (key.name === "escape") {
@@ -4693,7 +5617,8 @@ export function App() {
           key.preventDefault();
           setFilterEditing(false);
           setSelectedActionId(null);
-          setStack([page.kind === "sandboxes" ? SNAPSHOTS_PAGE : ROOT_PAGE]);
+          const delta = key.name === "backtab" || key.shift ? -1 : 1;
+          setStack([nextHomePage(page.kind, delta)]);
           return;
         }
         const char = printableChar(key);
@@ -4704,7 +5629,8 @@ export function App() {
       }
       if (key.name === "tab" || key.name === "backtab") {
         setSelectedActionId(null);
-        setStack([page.kind === "sandboxes" ? SNAPSHOTS_PAGE : ROOT_PAGE]);
+        const delta = key.name === "backtab" || key.shift ? -1 : 1;
+        setStack([nextHomePage(page.kind, delta)]);
         return;
       }
       if (pressed === "1") {
@@ -4713,6 +5639,14 @@ export function App() {
       }
       if (pressed === "2") {
         setStack([SNAPSHOTS_PAGE]);
+        return;
+      }
+      if (pressed === "3") {
+        setStack([ACCOUNT_PAGE]);
+        return;
+      }
+      if (pressed === "p") {
+        openProfileSwitcher();
         return;
       }
       if (pressed === "/") {
@@ -5444,18 +6378,12 @@ export function App() {
         return;
       }
       if (key.name === "backspace" || key.name === "delete") {
-        setConnectForm((previous) => ({
-          ...previous,
-          [connectField]: removeLastChar(previous[connectField]),
-        }));
+        setConnectValue(connectField, removeLastChar(connectForm[connectField]));
         return;
       }
       const char = printableChar(key);
       if (char) {
-        setConnectForm((previous) => ({
-          ...previous,
-          [connectField]: appendText(previous[connectField], char),
-        }));
+        setConnectValue(connectField, appendText(connectForm[connectField], char));
       }
       return;
     }
@@ -5788,14 +6716,76 @@ export function App() {
           ]
         : [["ctrl+]", "detach"]];
     }
+    if (profileSwitcherOpen && (page.kind === "sandboxes" || page.kind === "snapshots")) {
+      return [
+        ["↑/↓", "profile"],
+        ["enter", "switch"],
+        ["esc", "close"],
+        ["tab", "switch tab"],
+        ["1/2/3", "tabs"],
+      ];
+    }
+    if (page.kind === "account") {
+      if (deleteProfileName) {
+        return [
+          ["enter", "delete profile"],
+          ["esc", "cancel"],
+        ];
+      }
+      if (revokeToken) {
+        return [
+          ["enter", "revoke token"],
+          ["esc", "cancel"],
+        ];
+      }
+      if (createdToken) {
+        if (secretMode === "save-profile") {
+          return [
+            ["enter", "save profile"],
+            ["esc", "back"],
+          ];
+        }
+        return [
+          ["c", "copy secret"],
+          ...(profileBlocked ? [] : ([["s", "save as profile"]] as ActionHint[])),
+          ["esc", "done"],
+        ];
+      }
+      if (tokenForm) {
+        if (tokenFocus === "role" || tokenFocus === "expiry") {
+          return [
+            ["←/→", "change"],
+            ["tab", "next field"],
+            ["enter", "next field"],
+            ["esc", "cancel"],
+          ];
+        }
+        return [
+          ["tab", "next field"],
+          ["enter", tokenFocus === "submit" ? "create token" : "next field"],
+          ["esc", "cancel"],
+        ];
+      }
+      return [
+        ["↑/↓", "profile / token"],
+        ["enter", "switch / revoke"],
+        ["a", "add profile"],
+        ["d", "delete profile"],
+        ["t", "new token"],
+        ["r", "revoke token"],
+        ["tab", "switch tab"],
+        ["1/2/3", "tabs"],
+      ];
+    }
     if (page.kind === "sandboxes" || page.kind === "snapshots") {
       return actionHints(actions, {
         extra: [
           ["↑/↓", "move"],
           ["/", "filter"],
           ["s", "sort"],
+          ["p", "profiles"],
           ["tab", "switch tab"],
-          ["1/2", "tabs"],
+          ["1/2/3", "tabs"],
         ],
       });
     }
@@ -6118,18 +7108,34 @@ export function App() {
     networkLimitsFocus,
     auditKindMenuOpen,
     auditHasMore,
+    profileSwitcherOpen,
+    deleteProfileName,
+    revokeToken,
+    createdToken,
+    secretMode,
+    tokenForm,
+    tokenFocus,
+    profileBlocked,
   ]);
 
   const helpGlobalHints = useMemo<ActionHint[]>(() => {
     if (page.kind === "sandboxes" || page.kind === "snapshots") {
       return [
         ["tab", "switch tab"],
-        ["1/2", "switch tab"],
+        ["1/2/3", "switch tab"],
         ["/", "filter"],
         ["s", "sort"],
+        ["p", "switch profile"],
         ["?", "help"],
         ["q", "quit"],
         ["esc", "clear filter / close help"],
+      ];
+    }
+    if (page.kind === "account") {
+      return [
+        ["tab", "switch tab"],
+        ["1/2/3", "switch tab"],
+        ["?", "help"],
       ];
     }
     return [
@@ -6179,6 +7185,41 @@ export function App() {
 
   let content: ReactNode;
   switch (page.kind) {
+    case "account":
+      content = (
+        <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
+          <HomeTabs active="account" />
+          <AccountScreen
+            account={account}
+            accountError={accountError}
+            usage={usage}
+            source={configSource}
+            configUrl={config?.apiUrl ?? null}
+            activeProfile={activeProfile}
+            profiles={profiles}
+            selectedRow={accountSelection.index}
+            profileBlockedReason={profileBlocked}
+            tokens={accountTokens}
+            tokensLoading={apiTokensLoading}
+            tokensError={apiTokensError}
+            tokensVisible={tokensVisible}
+            tokensNote={tokensNote}
+            canManageTokens={canManageTokens}
+            tokenForm={tokenForm}
+            tokenFocus={tokenFocus}
+            tokenFormError={tokenFormError}
+            tokenCreating={tokenCreating}
+            createdToken={createdToken}
+            secretMode={secretMode}
+            secretProfileName={secretProfileName}
+            secretError={secretError}
+            deleteProfileName={deleteProfileName}
+            revokeToken={revokeToken}
+            revokeError={revokeError}
+          />
+        </box>
+      );
+      break;
     case "connect":
       content = (
         <ConnectScreen
@@ -6614,17 +7655,26 @@ export function App() {
       content = (
         <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
           <HomeTabs active="snapshots" />
-          <SnapshotsScreen
-            snapshots={visibleSnapshots}
-            sandboxes={sandboxes}
-            totalCount={snapshots.length}
-            selected={snapshotSelected}
-            filter={snapshotFilter}
-            filterEditing={filterEditing}
-            sort={snapshotSort}
-            loading={snapshotsLoading}
-            error={snapshotsError}
-          />
+          {profileSwitcherOpen ? (
+            <ProfileSwitcherPanel
+              profiles={profiles}
+              index={profileSwitcherIndex}
+              activeProfile={activeProfile}
+              blockedReason={profileBlocked}
+            />
+          ) : (
+            <SnapshotsScreen
+              snapshots={visibleSnapshots}
+              sandboxes={sandboxes}
+              totalCount={snapshots.length}
+              selected={snapshotSelected}
+              filter={snapshotFilter}
+              filterEditing={filterEditing}
+              sort={snapshotSort}
+              loading={snapshotsLoading}
+              error={snapshotsError}
+            />
+          )}
         </box>
       );
       break;
@@ -6632,16 +7682,25 @@ export function App() {
       content = (
         <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
           <HomeTabs active="sandboxes" />
-          <ListScreen
-            sandboxes={visibleSandboxes}
-            totalCount={sandboxes.length}
-            selected={selected}
-            filter={sandboxFilter}
-            filterEditing={filterEditing}
-            sort={sandboxSort}
-            loading={listLoading}
-            error={listError}
-          />
+          {profileSwitcherOpen ? (
+            <ProfileSwitcherPanel
+              profiles={profiles}
+              index={profileSwitcherIndex}
+              activeProfile={activeProfile}
+              blockedReason={profileBlocked}
+            />
+          ) : (
+            <ListScreen
+              sandboxes={visibleSandboxes}
+              totalCount={sandboxes.length}
+              selected={selected}
+              filter={sandboxFilter}
+              filterEditing={filterEditing}
+              sort={sandboxSort}
+              loading={listLoading}
+              error={listError}
+            />
+          )}
         </box>
       );
   }
@@ -6669,7 +7728,11 @@ export function App() {
     >
       <Header
         breadcrumbs={breadcrumbTrail(stack)}
-        right={config ? safeHost(config.apiUrl) : undefined}
+        right={
+          config
+            ? `${headerProfile ? `${headerProfile} · ` : ""}${safeHost(config.apiUrl)}`
+            : (headerProfile ?? undefined)
+        }
       />
       <ToastLine toast={toast} />
       {content}

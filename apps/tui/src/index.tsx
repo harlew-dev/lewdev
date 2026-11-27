@@ -66,10 +66,13 @@ Updates:
 
 Keys:
   ↑/↓ or j/k move · enter select/open · esc back · ctrl+c quit
-  Sandbox list: n new · c connect · q quit
+  Tabs: 1 sandboxes · 2 snapshots · 3 account · tab cycles all three
+  Sandbox list: n new · c connect · p switch profile · q quit
   Sandbox page: enter runs the selected action
   Ports page: o open port · x close port
   Sessions page: enter attach · v output · k kill · n new shell
+  Account: enter switch profile · a add profile · d delete profile
+           t new token · r revoke token · c copy secret · s save as profile
   Terminal: ctrl+] detaches; the session keeps running
 
 Private sandbox keys are stored in the same config directory under keys/.

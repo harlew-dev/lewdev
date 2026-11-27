@@ -5,11 +5,12 @@ import { Field, FormButton, Panel } from "../components";
 import { colors } from "../theme";
 
 export interface ConnectFormState {
+  profile: string;
   url: string;
   token: string;
 }
 
-export type ConnectField = "url" | "token" | "submit";
+export type ConnectField = "profile" | "url" | "token" | "submit";
 
 interface ConnectScreenProps {
   form: ConnectFormState;
@@ -35,6 +36,14 @@ export function ConnectScreen({ form, activeField, busy, error, configPath }: Co
           one.
         </text>
         <box flexDirection="column" gap={1}>
+          <box id="connect-profile">
+            <Field
+              label="Profile name"
+              value={form.profile}
+              active={activeField === "profile"}
+              placeholder="e.g. eu-west"
+            />
+          </box>
           <box id="connect-url">
             <Field
               label="API URL"
@@ -54,8 +63,8 @@ export function ConnectScreen({ form, activeField, busy, error, configPath }: Co
           </box>
         </box>
         <text fg={colors.muted} wrapMode="word">
-          The token is hidden while you type. Ctrl+V pastes from the system clipboard. lewdev checks
-          the server health before saving.
+          The profile is how lewdev remembers this server. The token is hidden while you type.
+          Ctrl+V pastes from the system clipboard. lewdev checks the server health before saving.
         </text>
         {busy ? <text fg={colors.accent}>Verifying connection…</text> : null}
         {error ? (
