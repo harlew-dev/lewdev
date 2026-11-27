@@ -81,7 +81,7 @@ describe("breadcrumbs", () => {
     expect(breadcrumbTrail(stackOf({ kind: "new-sandbox" }))).toEqual(["Sandboxes", "New sandbox"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "ssh-details", ...myBox })),
-    ).toEqual(["Sandboxes", "my-box", "Settings"]);
+    ).toEqual(["Sandboxes", "my-box", "SSH settings"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "delete-sandbox", ...myBox })),
     ).toEqual(["Sandboxes", "my-box", "Delete sandbox"]);
@@ -96,7 +96,7 @@ describe("breadcrumbs", () => {
           { kind: "forget-host", ...myBox },
         ),
       ),
-    ).toEqual(["Sandboxes", "my-box", "Settings", "Forget host key"]);
+    ).toEqual(["Sandboxes", "my-box", "SSH settings", "Forget host key"]);
     expect(
       breadcrumbTrail(
         stackOf(
@@ -105,7 +105,7 @@ describe("breadcrumbs", () => {
           { kind: "trust-hosts", ...myBox },
         ),
       ),
-    ).toEqual(["Sandboxes", "my-box", "Settings", "Trust host keys"]);
+    ).toEqual(["Sandboxes", "my-box", "SSH settings", "Trust host keys"]);
   });
 
   test("names the snapshot tab and pages", () => {

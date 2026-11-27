@@ -48,7 +48,7 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   sandbox: null,
   resize: "Resize",
   lifecycle: "Lifecycle",
-  "ssh-details": "Settings",
+  "ssh-details": "SSH settings",
   "setup-ssh": "Set up SSH",
   "ssh-include": "Allow SSH config",
   "add-ssh-key": "Add SSH key",

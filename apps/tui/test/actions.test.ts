@@ -25,6 +25,7 @@ import {
   buildSnapshotListActions,
   buildSnapshotPageActions,
   buildSshDetailsActions,
+  buildSshDetailsGroups,
   buildSshIncludeActions,
   buildTrustHostActions,
   findActionForKey,
@@ -56,7 +57,6 @@ describe("sandbox page actions", () => {
       "lifecycle",
       "delete",
       "ssh",
-      "setup-ssh",
       "open-vscode",
       "copy-ssh",
       "ssh-info",
@@ -65,7 +65,7 @@ describe("sandbox page actions", () => {
       "back",
     ]);
     expect(actions.find((entry) => entry.id === "ssh")?.label).toBe("Open terminal");
-    expect(actions.find((entry) => entry.id === "ssh-info")?.label).toBe("Settings");
+    expect(actions.find((entry) => entry.id === "ssh-info")?.label).toBe("SSH settings");
     expect(actions.find((entry) => entry.id === "delete")?.tone).toBe("error");
     expect(shortcuts(actions)).toEqual({
       start: undefined,
@@ -75,7 +75,6 @@ describe("sandbox page actions", () => {
       lifecycle: undefined,
       delete: undefined,
       ssh: undefined,
-      "setup-ssh": undefined,
       "open-vscode": undefined,
       "copy-ssh": undefined,
       "ssh-info": undefined,
@@ -89,8 +88,26 @@ describe("sandbox page actions", () => {
     );
   });
 
-  test("hides Set up SSH once a config block exists", () => {
-    const actions = buildSandboxPageActions({ ...started, sshConfigured: true });
+  test("offers one guided connect action until direct SSH is set up", () => {
+    const actions = buildSandboxPageActions({
+      ...started,
+      directReady: false,
+      sshConfigured: false,
+    });
+    expect(actions.find((entry) => entry.id === "setup-ssh")?.label).toBe(
+      "Connect with VS Code / SSH",
+    );
+    expect(actions.find((entry) => entry.id === "open-vscode")).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "copy-ssh")).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "ssh-info")?.label).toBe("SSH settings");
+  });
+
+  test("keeps the direct SSH actions once a config block exists", () => {
+    const actions = buildSandboxPageActions({
+      ...started,
+      directReady: false,
+      sshConfigured: true,
+    });
     expect(actions.find((entry) => entry.id === "setup-ssh")).toBeUndefined();
     expect(
       actions.filter((entry) => entry.id === "open-vscode" || entry.id === "copy-ssh"),
@@ -130,7 +147,7 @@ describe("sandbox page actions", () => {
 
     expect(ssh?.enabled).toBe(false);
     expect(ssh?.unavailableReason).toBe(
-      "No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created.",
+      'No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created. Use "Connect with VS Code / SSH" instead.',
     );
   });
 
@@ -141,23 +158,32 @@ describe("sandbox page actions", () => {
     );
   });
 
-  test("disables direct SSH until setup has run", () => {
-    const actions = buildSandboxPageActions({ ...started, directReady: false });
+  test("disables the direct SSH actions when a config block is broken", () => {
+    const actions = buildSandboxPageActions({
+      ...started,
+      directReady: false,
+      sshConfigured: true,
+    });
     for (const id of ["open-vscode", "copy-ssh"] as const) {
       expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
-        'SSH is not set up yet. Choose "Set up SSH" first.',
+        'SSH is not working. Open "SSH settings" and choose "Repair SSH".',
       );
     }
-    expect(actions.find((entry) => entry.id === "setup-ssh")?.enabled).toBe(true);
+    expect(actions.find((entry) => entry.id === "setup-ssh")).toBeUndefined();
   });
 
   test("disables SSH setup on sandboxes without a shell", () => {
-    const actions = buildSandboxPageActions({ ...started, hasShell: false });
-    for (const id of ["setup-ssh", "open-vscode", "copy-ssh"] as const) {
-      expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
-        "This sandbox has no shell, so it cannot run sshd.",
-      );
-    }
+    const actions = buildSandboxPageActions({
+      ...started,
+      directReady: false,
+      sshConfigured: false,
+      hasShell: false,
+    });
+    expect(actions.find((entry) => entry.id === "setup-ssh")?.unavailableReason).toBe(
+      "This sandbox has no shell, so it cannot run sshd.",
+    );
+    expect(actions.find((entry) => entry.id === "open-vscode")).toBeUndefined();
+    expect(actions.find((entry) => entry.id === "copy-ssh")).toBeUndefined();
   });
 
   test("disables lifecycle actions while the sandbox is transitioning", () => {
@@ -165,7 +191,6 @@ describe("sandbox page actions", () => {
 
     for (const id of [
       "ssh",
-      "setup-ssh",
       "open-vscode",
       "copy-ssh",
       "ports",
@@ -180,6 +205,16 @@ describe("sandbox page actions", () => {
         "The sandbox is still starting. Wait for it to finish.",
       );
     }
+
+    const unconfigured = buildSandboxPageActions({
+      ...started,
+      status: "creating",
+      directReady: false,
+      sshConfigured: false,
+    });
+    expect(unconfigured.find((entry) => entry.id === "setup-ssh")?.unavailableReason).toBe(
+      "The sandbox is still starting. Wait for it to finish.",
+    );
   });
 
   test("disables sandbox actions until the details have loaded", () => {
@@ -221,7 +256,7 @@ describe("sandbox page groups", () => {
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
       ["start", "stop", "restart", "resize", "lifecycle", "delete"],
       ["ssh"],
-      ["setup-ssh", "open-vscode", "copy-ssh", "ssh-info"],
+      ["open-vscode", "copy-ssh", "ssh-info"],
       ["ports"],
       ["create-snapshot"],
       ["back"],
@@ -240,6 +275,19 @@ describe("sandbox page groups", () => {
       },
     ]);
     expect(groups.flatMap((group) => group.actions)).toEqual(actions);
+  });
+
+  test("shows the guided connect action and settings before setup", () => {
+    const actions = buildSandboxPageActions({
+      ...started,
+      directReady: false,
+      sshConfigured: false,
+    });
+    const groups = buildSandboxPageGroups(actions, []);
+    const ssh = groups.find((group) => group.title === "SSH");
+
+    expect(ssh?.actions.map((entry) => entry.id)).toEqual(["setup-ssh", "ssh-info"]);
+    expect(ssh?.actions[0]?.label).toBe("Connect with VS Code / SSH");
   });
 
   test("shows a muted note when no ports are open", () => {
@@ -393,6 +441,51 @@ describe("other page actions", () => {
     expect(actions.find((entry) => entry.id === "disable-ssh")?.tone).toBe("error");
     expect(actions.find((entry) => entry.id === "back")?.key).toBe("esc");
     expect(actions.find((entry) => entry.id === "quit")).toBeUndefined();
+
+    const groups = buildSshDetailsGroups(actions);
+    expect(groups.map((group) => group.title)).toEqual([undefined, "Advanced", undefined]);
+    expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
+      ["copy-ssh"],
+      [
+        "repair-ssh",
+        "reset-ssh",
+        "disable-ssh",
+        "add-ssh-key",
+        "remove-ssh-key",
+        "trust-hosts",
+        "forget-host",
+      ],
+      ["back"],
+    ]);
+  });
+
+  test("offers public setup from Advanced only before direct SSH is set up", () => {
+    const unconfigured = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: false,
+      hasKeys: false,
+      running: true,
+      hasShell: true,
+      mode: null,
+    });
+    expect(unconfigured.find((entry) => entry.id === "setup-public-ssh")?.label).toBe(
+      "Set up public SSH",
+    );
+    expect(
+      buildSshDetailsGroups(unconfigured)
+        .find((group) => group.title === "Advanced")
+        ?.actions.map((entry) => entry.id),
+    ).toContain("setup-public-ssh");
+
+    const configured = buildSshDetailsActions({
+      canManageHostKeys: true,
+      directReady: true,
+      hasKeys: true,
+      running: true,
+      hasShell: true,
+      mode: "private",
+    });
+    expect(configured.find((entry) => entry.id === "setup-public-ssh")).toBeUndefined();
   });
 
   test("Reset SSH stays available while running even when SSH is broken", () => {
@@ -499,6 +592,35 @@ describe("direct SSH pages", () => {
     expect(done.find((entry) => entry.id === "back")?.label).toBe("Done");
   });
 
+  test("guided setup retries private SSH without the private/public prompt", () => {
+    const retry = buildSetupSshActions({
+      running: false,
+      completed: false,
+      failed: true,
+      guided: true,
+    });
+    expect(retry.map((entry) => entry.id)).toEqual(["confirm-setup-private", "back"]);
+    expect(retry.find((entry) => entry.id === "confirm-setup-private")?.label).toBe("Try again");
+    expect(retry.find((entry) => entry.id === "confirm-setup-public")).toBeUndefined();
+
+    const initial = buildSetupSshActions({
+      running: false,
+      completed: false,
+      failed: false,
+      guided: true,
+    });
+    expect(initial.map((entry) => entry.id)).toEqual(["confirm-setup-private", "back"]);
+
+    const done = buildSetupSshActions({
+      running: false,
+      completed: true,
+      failed: false,
+      guided: true,
+    });
+    expect(done.map((entry) => entry.id)).toEqual(["back"]);
+    expect(done.find((entry) => entry.id === "back")?.label).toBe("Done");
+  });
+
   test("reset confirmation offers reset and cancel", () => {
     const actions = buildResetSshActions();
     expect(actions.map((entry) => entry.id)).toEqual(["confirm-reset-ssh", "back"]);
@@ -579,7 +701,7 @@ describe("action selection and hints", () => {
   });
 
   test("keeps the selected id across a rebuild and wraps", () => {
-    expect(actionIndex(actions, "ports")).toBe(11);
+    expect(actionIndex(actions, "ports")).toBe(10);
     expect(actionIndex(actions, "missing" as never)).toBe(0);
     // With nothing selected, the first enabled action wins: Start is disabled while running.
     expect(actionIndex(actions, null)).toBe(1);

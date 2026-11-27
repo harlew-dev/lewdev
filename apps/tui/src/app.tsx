@@ -461,6 +461,7 @@ export function App() {
   const [authorizedKeysError, setAuthorizedKeysError] = useState<string | null>(null);
   const [setupSteps, setSetupSteps] = useState<SetupSteps>(emptySetupSteps);
   const [setupRunning, setSetupRunning] = useState(false);
+  const [setupGuided, setSetupGuided] = useState(false);
   const [setupMode, setSetupMode] = useState<DirectSshMode>("private");
   const [setupError, setSetupError] = useState<string | null>(null);
   const [setupResult, setSetupResult] = useState<DirectSshSetupResult | null>(null);
@@ -1136,6 +1137,7 @@ export function App() {
           completed: setupResult !== null,
           failed: setupError !== null,
           mode: setupMode,
+          guided: setupGuided,
         });
       case "enable-public-ssh":
         return buildEnablePublicSshActions();
@@ -1190,6 +1192,7 @@ export function App() {
     authorizedKeys,
     sshKeySelected,
     setupRunning,
+    setupGuided,
     setupMode,
     setupResult,
     setupError,
@@ -1288,13 +1291,16 @@ export function App() {
         return;
       }
       case "setup-ssh":
-        openSetupSsh();
+        openConnectSsh();
+        return;
+      case "setup-public-ssh":
+        openSetupSsh("public");
         return;
       case "confirm-setup-private":
-        void performSetupSsh(false, "private");
+        void performSetupSsh({ mode: "private" });
         return;
       case "confirm-setup-public":
-        void performSetupSsh(false, "public");
+        void performSetupSsh({ mode: "public" });
         return;
       case "repair-ssh":
         openSetupSsh();
@@ -1594,12 +1600,13 @@ export function App() {
     sshSession.current = session;
   }, []);
 
-  function openSetupSsh(): void {
+  function openSetupSsh(requestedMode?: DirectSshMode): void {
     const target = actionTarget();
     if (!target) {
       return;
     }
-    const mode = directInfo?.block?.mode ?? "private";
+    const mode = requestedMode ?? directInfo?.block?.mode ?? "private";
+    setSetupGuided(false);
     setSetupMode(mode);
     setSetupSteps(emptySetupSteps());
     setSetupRunning(false);
@@ -1609,13 +1616,37 @@ export function App() {
     setSelectedActionId(mode === "public" ? "confirm-setup-public" : "confirm-setup-private");
   }
 
-  async function performSetupSsh(reset = false, requestedMode?: DirectSshMode): Promise<void> {
+  function openConnectSsh(): void {
+    const target = actionTarget();
+    if (!target) {
+      return;
+    }
+    setSetupGuided(true);
+    setSetupMode("private");
+    setSetupSteps(emptySetupSteps());
+    setSetupRunning(false);
+    setSetupError(null);
+    setSetupResult(null);
+    pushSandboxScoped({ kind: "setup-ssh", ...target });
+    void performSetupSsh({ target, mode: "private", guided: true });
+  }
+
+  async function performSetupSsh(
+    options: {
+      reset?: boolean;
+      mode?: DirectSshMode;
+      target?: SandboxPageTarget;
+      guided?: boolean;
+    } = {},
+  ): Promise<void> {
     const target =
-      page.kind === "setup-ssh" || page.kind === "reset-ssh" ? pageSandbox(page) : null;
+      options.target ??
+      (page.kind === "setup-ssh" || page.kind === "reset-ssh" ? pageSandbox(page) : null);
     if (!api || !target || setupRunning) {
       return;
     }
-    const mode = requestedMode ?? directInfo?.block?.mode ?? "private";
+    const guided = options.guided ?? setupGuided;
+    const mode = options.mode ?? directInfo?.block?.mode ?? "private";
     setSetupMode(mode);
     setSetupSteps(emptySetupSteps());
     setSetupError(null);
@@ -1631,15 +1662,22 @@ export function App() {
           },
         }));
       };
-      const result = reset
+      const result = options.reset
         ? await resetDirectSsh(api, target.id, { onProgress, mode })
         : await setupDirectSsh(api, target.id, { onProgress, mode });
       setSetupResult(result);
+      if (guided) {
+        // The sandbox action that started this flow no longer exists once SSH is
+        // set up; land on the first available action when we return.
+        sandboxActionRef.current = null;
+      }
       await loadDetails(target.id);
       await refreshDirectSshState(target.id, true);
       await refreshAuthorizedKeys(target.id);
       if (!result.includePresent) {
-        pushSandboxScoped({ kind: "ssh-include", purpose: "setup", ...target });
+        pushSandboxScoped({ kind: "ssh-include", purpose: guided ? "vscode" : "setup", ...target });
+      } else if (guided) {
+        await openVscodeDirectory(target);
       } else {
         showToast("success", "Direct SSH is ready.");
       }
@@ -1660,9 +1698,10 @@ export function App() {
     setSetupResult(null);
     setSelectedActionId(null);
     const mode = directInfo?.block?.mode ?? "private";
+    setSetupGuided(false);
     setSetupMode(mode);
     setStack((previous) => [...popPage(previous), { kind: "setup-ssh", ...target }]);
-    await performSetupSsh(true, mode);
+    await performSetupSsh({ reset: true, mode, target, guided: false });
   }
 
   async function performEnablePublicSsh(): Promise<void> {
@@ -1740,7 +1779,7 @@ export function App() {
       return;
     }
     if (!directReady) {
-      showToast("error", "Set up SSH first, then open the sandbox in VS Code.");
+      showToast("error", 'SSH is not working. Choose "Repair SSH" in SSH settings.');
       return;
     }
     try {
@@ -1768,7 +1807,16 @@ export function App() {
       pathInput: start,
       loading: true,
     });
-    pushSandboxScoped({ kind: "vscode-directory", ...target });
+    if (currentPage(stackRef.current).kind === "sandbox") {
+      sandboxActionRef.current = selectedActionId;
+    }
+    // The guided connect flow runs on a transient setup page; opening the
+    // picker replaces it so cancelling the picker lands on the sandbox page.
+    setSelectedActionId(null);
+    setStack((previous) => {
+      const base = currentPage(previous).kind === "setup-ssh" ? popPage(previous) : previous;
+      return pushScopedPage(base, { kind: "vscode-directory", ...target });
+    });
     const loaded = await loadVscodeDirectory(target.id, start);
     if (!loaded) {
       await loadVscodeDirectory(target.id, "/");
@@ -1911,7 +1959,7 @@ export function App() {
         command = formatExplicitSshCommand(block);
       }
       if (!command) {
-        showToast("error", "Set up SSH first, then copy the command.");
+        showToast("error", 'SSH is not ready. Choose "Repair SSH" in SSH settings.');
         return;
       }
       const copied = await writeClipboard(command);
@@ -1965,7 +2013,7 @@ export function App() {
       showToast(
         "success",
         key.isLewdev
-          ? "Removed lewdev's key. Run Set up SSH to restore it."
+          ? "Removed lewdev's key. Run Connect with VS Code / SSH to restore it."
           : "Removed the SSH key.",
       );
     } catch (error) {

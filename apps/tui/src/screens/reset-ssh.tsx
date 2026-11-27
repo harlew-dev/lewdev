@@ -17,7 +17,7 @@ export function ResetSshScreen({ label, actions, selectedIndex }: ResetSshScreen
       <text fg={colors.muted} wrapMode="word">
         Use this after the sandbox was wiped or reinstalled. lewdev tries to remove its old public
         key from root&apos;s authorized_keys, deletes its local SSH state for this sandbox, then
-        runs the normal Set up SSH flow. That generates a fresh lewdev key.
+        runs the normal setup flow. That generates a fresh lewdev key.
       </text>
       <text fg={colors.muted} wrapMode="word">
         Other authorized keys are kept. Removing the old key is best effort because a wiped sandbox

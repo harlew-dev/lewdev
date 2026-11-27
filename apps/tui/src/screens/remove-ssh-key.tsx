@@ -83,7 +83,7 @@ export function RemoveSshKeyScreen({
         {active?.isLewdev ? (
           <text fg={colors.warning} wrapMode="word">
             This is lewdev&apos;s own key. Removing it stops lewdev from connecting until you run
-            Set up SSH again.
+            Connect with VS Code / SSH again.
           </text>
         ) : null}
         <ActionList groups={[{ actions }]} selectedIndex={selectedIndex} />

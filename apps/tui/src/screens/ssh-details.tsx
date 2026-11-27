@@ -142,7 +142,7 @@ export function SshDetailsScreen({
               </text>
             ) : (
               <text fg={colors.warning} wrapMode="word">
-                Not created yet. Run Set up SSH on the sandbox page.
+                Not created yet. Use Connect with VS Code / SSH on the sandbox page.
               </text>
             )}
           </InfoRow>

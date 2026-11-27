@@ -71,7 +71,7 @@ export function SetupSshScreen({
       <Panel title="Set up SSH" width={82}>
         <text fg={colors.text} wrapMode="word">
           {result
-            ? `Direct SSH is ready in ${result.mode} mode. Run Repair SSH from Settings whenever SSH stops working.`
+            ? `Direct SSH is ready in ${result.mode} mode. Run Repair SSH from Advanced in SSH settings whenever SSH stops working.`
             : "Choose private SSH (recommended: no exposed port, through the AerolVM API) or public SSH (TCP port 22 on the internet, key-only). It is safe to re-run; every step repairs only what is missing."}
         </text>
         <box flexDirection="column" flexShrink={0} gap={0}>
@@ -127,6 +127,13 @@ export function SetupSshScreen({
             <text fg={colors.muted} wrapMode="word">
               Config: {result.sshConfigPath}
             </text>
+            {result.includePresent ? null : (
+              <text fg={colors.warning} wrapMode="word">
+                ~/.ssh/config has no lewdev Include, so VS Code Remote-SSH and the short ssh alias
+                will not work. Use "Copy SSH command" on the sandbox page for an explicit command,
+                or choose "Open in VS Code" again to add the Include.
+              </text>
+            )}
           </box>
         ) : null}
         <ActionList groups={[{ actions }]} selectedIndex={selectedIndex} />

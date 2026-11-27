@@ -16,7 +16,8 @@ export function DisableSshScreen({ label, actions, selectedIndex }: DisableSshSc
       </text>
       <text fg={colors.muted} wrapMode="word">
         lewdev closes TCP port 22, stops sshd, and removes this sandbox from its SSH config. The key
-        and root&apos;s authorized_keys are kept, so Set up SSH can restore access later.
+        and root&apos;s authorized_keys are kept, so Connect with VS Code / SSH can restore access
+        later.
       </text>
       <ActionList groups={[{ actions }]} selectedIndex={selectedIndex} />
     </Panel>

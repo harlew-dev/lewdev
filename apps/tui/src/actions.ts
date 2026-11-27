@@ -10,6 +10,7 @@ export type ActionId =
   | "ssh"
   | "ssh-info"
   | "setup-ssh"
+  | "setup-public-ssh"
   | "confirm-setup-private"
   | "confirm-setup-public"
   | "repair-ssh"
@@ -87,7 +88,7 @@ export interface ActionGroup {
 }
 
 const NO_KEY_REASON =
-  "No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created.";
+  'No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created. Use "Connect with VS Code / SSH" instead.';
 const LOADING_REASON = "The sandbox details are still loading.";
 const TRANSITIONAL_REASON = "The sandbox is still starting. Wait for it to finish.";
 const DELETED_REASON = "The sandbox has been deleted.";
@@ -156,8 +157,8 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
     (context.directReady
       ? undefined
       : context.sshConfigured
-        ? 'SSH is not working. Choose "Repair SSH" in Settings.'
-        : 'SSH is not set up yet. Choose "Set up SSH" first.');
+        ? 'SSH is not working. Open "SSH settings" and choose "Repair SSH".'
+        : 'SSH is not set up yet. Use "Connect with VS Code / SSH" on the sandbox page first.');
 
   const portsReason = blocked ?? (running ? undefined : "Start the sandbox before managing ports.");
 
@@ -361,6 +362,7 @@ export function buildCreateSnapshotConfirmActions(): PageAction[] {
 /** Actions on a sandbox page, in the order the grouped list shows them. */
 export function buildSandboxPageActions(context: SandboxActionContext): PageAction[] {
   const reasons = sandboxReasons(context);
+  const directSetUp = context.directReady === true || context.sshConfigured === true;
 
   return [
     action(
@@ -420,40 +422,44 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       "Open the gateway SSH session in an embedded terminal.",
       reasons.ssh,
     ),
-    ...(context.sshConfigured
+    ...(directSetUp
       ? []
       : [
           action(
             "setup-ssh",
-            "Set up SSH",
-            "set up ssh",
+            "Connect with VS Code / SSH",
+            "connect vs code",
             undefined,
-            "Choose private SSH through the AerolVM API, or public TCP SSH.",
+            "Set up private SSH and open the sandbox in VS Code, or copy the SSH command.",
             reasons.setupSsh,
           ),
         ]),
-    action(
-      "open-vscode",
-      "Open in VS Code",
-      "vs code",
-      undefined,
-      "Open /root through VS Code Remote-SSH.",
-      reasons.directSsh,
-    ),
-    action(
-      "copy-ssh",
-      "Copy SSH command",
-      "copy ssh",
-      undefined,
-      "Copy the ssh command for this sandbox.",
-      reasons.directSsh,
-    ),
+    ...(directSetUp
+      ? [
+          action(
+            "open-vscode",
+            "Open in VS Code",
+            "vs code",
+            undefined,
+            "Open /root through VS Code Remote-SSH.",
+            reasons.directSsh,
+          ),
+          action(
+            "copy-ssh",
+            "Copy SSH command",
+            "copy ssh",
+            undefined,
+            "Copy the ssh command for this sandbox.",
+            reasons.directSsh,
+          ),
+        ]
+      : []),
     action(
       "ssh-info",
-      "Settings",
+      "SSH settings",
       "settings",
       undefined,
-      "Show connection details, authorized keys, and gateway settings.",
+      "Show connection details and advanced SSH settings.",
       undefined,
     ),
     action(
@@ -533,7 +539,9 @@ export function buildSshDetailsActions(context: {
         ? "This sandbox has no shell, so it cannot run sshd."
         : context.directReady
           ? undefined
-          : 'SSH is not set up yet. Choose "Set up SSH" on the sandbox page first.';
+          : context.mode === null || context.mode === undefined
+            ? 'SSH is not set up yet. Use "Connect with VS Code / SSH" on the sandbox page first.'
+            : 'SSH is not working. Choose "Repair SSH" below.';
   const repairReason =
     context.running === false
       ? "The sandbox must be running to repair SSH."
@@ -552,7 +560,21 @@ export function buildSshDetailsActions(context: {
       : context.hasShell === false
         ? "This sandbox has no shell, so it cannot run sshd."
         : undefined;
+  const notConfigured = context.mode === null;
   return [
+    ...(notConfigured && !context.directReady
+      ? [
+          action(
+            "setup-public-ssh",
+            "Set up public SSH",
+            "public ssh",
+            undefined,
+            "Expose TCP port 22 to the internet and configure public SSH from scratch.",
+            modeReason,
+            "error",
+          ),
+        ]
+      : []),
     action(
       "copy-ssh",
       "Copy SSH command",
@@ -600,7 +622,7 @@ export function buildSshDetailsActions(context: {
       "Reset SSH",
       "reset ssh",
       undefined,
-      "Remove lewdev's key and local SSH state, then run Set up SSH again with a fresh key.",
+      "Remove lewdev's key and local SSH state, then run setup again with a fresh key.",
       resetReason,
       "error",
     ),
@@ -661,20 +683,22 @@ export function buildSshDetailsGroups(actions: PageAction[]): ActionGroup[] {
       return entry ? [entry] : [];
     });
   return [
+    { actions: collect(["copy-ssh"]) },
     {
-      title: "Direct SSH",
+      title: "Advanced",
       actions: collect([
-        "copy-ssh",
-        "add-ssh-key",
-        "remove-ssh-key",
-        "disable-ssh",
-        "repair-ssh",
-        "reset-ssh",
+        "setup-public-ssh",
         "enable-public-ssh",
         "use-private-ssh",
+        "repair-ssh",
+        "reset-ssh",
+        "disable-ssh",
+        "add-ssh-key",
+        "remove-ssh-key",
+        "trust-hosts",
+        "forget-host",
       ]),
     },
-    { title: "Gateway terminal", actions: collect(["trust-hosts", "forget-host"]) },
     { actions: collect(["back"]) },
   ];
 }
@@ -685,9 +709,36 @@ export function buildSetupSshActions(context: {
   completed: boolean;
   failed: boolean;
   mode?: DirectSshMode;
+  /** Started from Connect with VS Code / SSH; no private/public prompt. */
+  guided?: boolean;
 }): PageAction[] {
   if (context.running) {
     return [];
+  }
+  const back = action(
+    "back",
+    context.completed ? "Done" : "Cancel",
+    context.completed ? "done" : "cancel",
+    "esc",
+    context.completed ? "Return to the sandbox page." : "Leave the sandbox unchanged.",
+    undefined,
+  );
+  if (context.guided) {
+    return [
+      ...(context.completed
+        ? []
+        : [
+            action(
+              "confirm-setup-private",
+              context.failed ? "Try again" : "Connect with VS Code / SSH",
+              "connect",
+              "enter",
+              "Run private SSH setup again.",
+              undefined,
+            ),
+          ]),
+      back,
+    ];
   }
   return [
     ...(context.completed
@@ -711,14 +762,7 @@ export function buildSetupSshActions(context: {
             "error",
           ),
         ]),
-    action(
-      "back",
-      context.completed ? "Done" : "Cancel",
-      context.completed ? "done" : "cancel",
-      "esc",
-      context.completed ? "Return to the sandbox page." : "Leave the sandbox unchanged.",
-      undefined,
-    ),
+    back,
   ];
 }
 
@@ -819,7 +863,7 @@ export function buildResetSshActions(): PageAction[] {
       "Reset SSH",
       "reset",
       undefined,
-      "Remove lewdev's old key and local SSH state, then run Set up SSH with a fresh key.",
+      "Remove lewdev's old key and local SSH state, then run setup again with a fresh key.",
       undefined,
       "error",
     ),
