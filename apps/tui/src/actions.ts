@@ -1,4 +1,4 @@
-import type { DirectSshMode, SandboxDetails } from "@lewdev/core";
+import type { DirectSshMode, SandboxDetails, TerminalSession } from "@lewdev/core";
 
 export type ActionId =
   | "open"
@@ -8,6 +8,12 @@ export type ActionId =
   | "resize"
   | "lifecycle"
   | "ssh"
+  | "sessions"
+  | "attach-session"
+  | "view-session"
+  | "kill-session"
+  | "confirm-kill-session"
+  | "new-shell"
   | "ssh-info"
   | "setup-ssh"
   | "setup-public-ssh"
@@ -87,18 +93,13 @@ export interface ActionGroup {
   actions: PageAction[];
 }
 
-const NO_KEY_REASON =
-  'No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created. Use "Connect with VS Code / SSH" instead.';
 const LOADING_REASON = "The sandbox details are still loading.";
 const TRANSITIONAL_REASON = "The sandbox is still starting. Wait for it to finish.";
 const DELETED_REASON = "The sandbox has been deleted.";
 
 export interface SandboxActionContext {
   status: SandboxDetails["status"] | null;
-  /** The gateway key lewdev saved when it created the sandbox. */
-  keyAvailable: boolean;
-  sshCommandAvailable: boolean;
-  /** False for WASM/isolate sandboxes, which have no shell to run sshd in. */
+  /** False for WASM/isolate sandboxes, which have no shell for SSH or sessions. */
   hasShell?: boolean;
   /** Direct SSH is configured and usable in its current mode. */
   directReady?: boolean;
@@ -107,7 +108,7 @@ export interface SandboxActionContext {
 }
 
 interface SandboxReasons {
-  ssh?: string;
+  terminal?: string;
   setupSsh?: string;
   directSsh?: string;
   ports?: string;
@@ -138,15 +139,13 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
         ? DELETED_REASON
         : undefined;
 
-  const sshReason =
+  const terminalReason =
     blocked ??
     (!running
-      ? "The sandbox must be running to connect via SSH."
-      : !context.keyAvailable
-        ? NO_KEY_REASON
-        : !context.sshCommandAvailable
-          ? "The SSH host could not be derived from the configured API URL."
-          : undefined);
+      ? "The sandbox must be running to open a terminal."
+      : context.hasShell === false
+        ? "This sandbox has no shell, so it cannot run a terminal session."
+        : undefined);
 
   const shellReason = blocked ?? (!running ? "The sandbox must be running to use SSH." : undefined);
   const noShellReason =
@@ -176,7 +175,7 @@ function sandboxReasons(context: SandboxActionContext): SandboxReasons {
     blocked ?? (running ? undefined : "The sandbox is not running. Use Start instead.");
 
   return {
-    ssh: sshReason,
+    terminal: terminalReason,
     setupSsh: noShellReason,
     directSsh: directReason,
     addKey: directReason,
@@ -419,8 +418,16 @@ export function buildSandboxPageActions(context: SandboxActionContext): PageActi
       "Open terminal",
       "open terminal",
       undefined,
-      "Open the gateway SSH session in an embedded terminal.",
-      reasons.ssh,
+      "Attach to this sandbox's running shell session, or start one.",
+      reasons.terminal,
+    ),
+    action(
+      "sessions",
+      "Sessions",
+      "sessions",
+      undefined,
+      "List terminal sessions, view their output, or kill one.",
+      reasons.terminal,
     ),
     ...(directSetUp
       ? []
@@ -508,7 +515,7 @@ export function buildSandboxPageGroups(
 
   return [
     { actions: collect(["start", "stop", "restart", "resize", "lifecycle", "delete"]) },
-    { title: "Terminal", actions: collect(["ssh"]) },
+    { title: "Terminal", actions: collect(["ssh", "sessions"]) },
     {
       title: "SSH",
       actions: collect(["setup-ssh", "open-vscode", "copy-ssh", "ssh-info"]),
@@ -952,6 +959,85 @@ export function buildOpenPortActions(): PageAction[] {
       undefined,
     ),
     action("back", "Cancel", "cancel", "esc", "Return to the ports list.", undefined),
+  ];
+}
+
+/** Actions on the Sessions page, acting on the selected session. */
+export function buildSessionsPageActions(context: {
+  sessions: TerminalSession[];
+  selected: TerminalSession | undefined;
+}): PageAction[] {
+  const selected = context.selected;
+  const noSessions = context.sessions.length === 0 ? "There are no sessions." : undefined;
+  const attachReason =
+    noSessions ??
+    (selected === undefined
+      ? "Select a session first."
+      : selected.status !== "running"
+        ? "The session has ended. View its output instead."
+        : !selected.pty
+          ? "This session has no terminal to attach to."
+          : undefined);
+  const inspectReason =
+    noSessions ?? (selected === undefined ? "Select a session first." : undefined);
+
+  return [
+    action(
+      "attach-session",
+      "Attach",
+      "attach",
+      "enter",
+      "Attach to the selected session's terminal.",
+      attachReason,
+    ),
+    action(
+      "view-session",
+      "View output",
+      "output",
+      "v",
+      "Read the selected session's recent output.",
+      inspectReason,
+    ),
+    action(
+      "kill-session",
+      "Kill session",
+      "kill",
+      // Not "k": that moves the cursor up, so it would kill a different session.
+      "x",
+      "Stop the session and remove its output; this cannot be undone.",
+      inspectReason,
+      "error",
+    ),
+    action(
+      "new-shell",
+      "New shell session",
+      "new shell",
+      "n",
+      "Start another login shell that keeps running when you leave.",
+      undefined,
+    ),
+    action("back", "Back", "back", "esc", "Return to the sandbox page.", undefined),
+  ];
+}
+
+/** Actions on the read-only session output page. */
+export function buildSessionLogActions(): PageAction[] {
+  return [action("back", "Back", "back", "esc", "Return to the sessions list.", undefined)];
+}
+
+/** Actions on the kill-session confirmation page. */
+export function buildKillSessionActions(): PageAction[] {
+  return [
+    action(
+      "confirm-kill-session",
+      "Kill session",
+      "kill",
+      undefined,
+      "Stop the session and remove its output; this cannot be undone.",
+      undefined,
+      "error",
+    ),
+    action("back", "Cancel", "cancel", "esc", "Leave the session running.", undefined),
   ];
 }
 

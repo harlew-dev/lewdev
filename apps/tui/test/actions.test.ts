@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { TerminalSession } from "@lewdev/core";
 
 import {
   actionHints,
@@ -9,6 +10,7 @@ import {
   buildDeleteActions,
   buildDisableSshActions,
   buildForgetHostActions,
+  buildKillSessionActions,
   buildNewSandboxActions,
   buildOpenPortActions,
   buildPortsPageActions,
@@ -17,6 +19,8 @@ import {
   buildSandboxListActions,
   buildSandboxPageActions,
   buildSandboxPageGroups,
+  buildSessionLogActions,
+  buildSessionsPageActions,
   buildCreateSnapshotActions,
   buildCreateSnapshotConfirmActions,
   buildNewSnapshotActions,
@@ -35,8 +39,6 @@ import {
 
 const started = {
   status: "started" as const,
-  keyAvailable: true,
-  sshCommandAvailable: true,
   hasShell: true,
   directReady: true,
 };
@@ -57,6 +59,7 @@ describe("sandbox page actions", () => {
       "lifecycle",
       "delete",
       "ssh",
+      "sessions",
       "open-vscode",
       "copy-ssh",
       "ssh-info",
@@ -75,6 +78,7 @@ describe("sandbox page actions", () => {
       lifecycle: undefined,
       delete: undefined,
       ssh: undefined,
+      sessions: undefined,
       "open-vscode": undefined,
       "copy-ssh": undefined,
       "ssh-info": undefined,
@@ -130,7 +134,10 @@ describe("sandbox page actions", () => {
       "The sandbox is already stopped.",
     );
     expect(actions.find((entry) => entry.id === "ssh")?.unavailableReason).toBe(
-      "The sandbox must be running to connect via SSH.",
+      "The sandbox must be running to open a terminal.",
+    );
+    expect(actions.find((entry) => entry.id === "sessions")?.unavailableReason).toBe(
+      "The sandbox must be running to open a terminal.",
     );
     expect(actions.find((entry) => entry.id === "ports")?.unavailableReason).toBe(
       "Start the sandbox before managing ports.",
@@ -141,21 +148,13 @@ describe("sandbox page actions", () => {
     expect(actions.find((entry) => entry.id === "ssh-info")?.enabled).toBe(true);
   });
 
-  test("disables SSH with the no-key reason", () => {
-    const actions = buildSandboxPageActions({ ...started, keyAvailable: false });
-    const ssh = actions.find((entry) => entry.id === "ssh");
-
-    expect(ssh?.enabled).toBe(false);
-    expect(ssh?.unavailableReason).toBe(
-      'No private key is stored for this sandbox. Keys are only available for sandboxes lewdev created. Use "Connect with VS Code / SSH" instead.',
-    );
-  });
-
-  test("disables SSH when the host cannot be derived", () => {
-    const actions = buildSandboxPageActions({ ...started, sshCommandAvailable: false });
-    expect(actions.find((entry) => entry.id === "ssh")?.unavailableReason).toBe(
-      "The SSH host could not be derived from the configured API URL.",
-    );
+  test("disables terminal actions on sandboxes without a shell", () => {
+    const actions = buildSandboxPageActions({ ...started, hasShell: false });
+    for (const id of ["ssh", "sessions"] as const) {
+      expect(actions.find((entry) => entry.id === id)?.unavailableReason).toBe(
+        "This sandbox has no shell, so it cannot run a terminal session.",
+      );
+    }
   });
 
   test("disables the direct SSH actions when a config block is broken", () => {
@@ -191,6 +190,7 @@ describe("sandbox page actions", () => {
 
     for (const id of [
       "ssh",
+      "sessions",
       "open-vscode",
       "copy-ssh",
       "ports",
@@ -218,11 +218,7 @@ describe("sandbox page actions", () => {
   });
 
   test("disables sandbox actions until the details have loaded", () => {
-    const actions = buildSandboxPageActions({
-      status: null,
-      keyAvailable: false,
-      sshCommandAvailable: true,
-    });
+    const actions = buildSandboxPageActions({ status: null });
     expect(actions.find((entry) => entry.id === "ssh")?.unavailableReason).toBe(
       "The sandbox details are still loading.",
     );
@@ -255,7 +251,7 @@ describe("sandbox page groups", () => {
     ]);
     expect(groups.map((group) => group.actions.map((entry) => entry.id))).toEqual([
       ["start", "stop", "restart", "resize", "lifecycle", "delete"],
-      ["ssh"],
+      ["ssh", "sessions"],
       ["open-vscode", "copy-ssh", "ssh-info"],
       ["ports"],
       ["create-snapshot"],
@@ -701,7 +697,7 @@ describe("action selection and hints", () => {
   });
 
   test("keeps the selected id across a rebuild and wraps", () => {
-    expect(actionIndex(actions, "ports")).toBe(10);
+    expect(actionIndex(actions, "ports")).toBe(11);
     expect(actionIndex(actions, "missing" as never)).toBe(0);
     // With nothing selected, the first enabled action wins: Start is disabled while running.
     expect(actionIndex(actions, null)).toBe(1);
@@ -727,5 +723,73 @@ describe("action selection and hints", () => {
       ["tab", "next field"],
       ["esc", "cancel"],
     ]);
+  });
+});
+
+function terminalSession(overrides: Partial<TerminalSession> = {}): TerminalSession {
+  return {
+    id: "ses-1",
+    name: "lewdev",
+    argv: ["bash", "-l"],
+    pty: true,
+    status: "running",
+    exitCode: 0,
+    createdAt: "2026-11-27T10:00:00Z",
+    startedAt: "2026-11-27T10:00:00Z",
+    recording: false,
+    bytes: 0,
+    attached: 0,
+    ...overrides,
+  };
+}
+
+describe("sessions page actions", () => {
+  test("attaches only to a running PTY session", () => {
+    const running = buildSessionsPageActions({
+      sessions: [terminalSession()],
+      selected: terminalSession(),
+    });
+    expect(running.find((entry) => entry.id === "attach-session")?.key).toBe("enter");
+    expect(running.find((entry) => entry.id === "attach-session")?.enabled).toBe(true);
+
+    const ended = buildSessionsPageActions({
+      sessions: [terminalSession({ status: "exited" })],
+      selected: terminalSession({ status: "exited" }),
+    });
+    expect(ended.find((entry) => entry.id === "attach-session")?.unavailableReason).toBe(
+      "The session has ended. View its output instead.",
+    );
+    expect(ended.find((entry) => entry.id === "view-session")?.enabled).toBe(true);
+
+    const noPty = buildSessionsPageActions({
+      sessions: [terminalSession({ pty: false })],
+      selected: terminalSession({ pty: false }),
+    });
+    expect(noPty.find((entry) => entry.id === "attach-session")?.unavailableReason).toBe(
+      "This session has no terminal to attach to.",
+    );
+  });
+
+  test("keeps new shell available with no sessions and marks kill destructive", () => {
+    const actions = buildSessionsPageActions({ sessions: [], selected: undefined });
+    expect(actions.map((entry) => entry.id)).toEqual([
+      "attach-session",
+      "view-session",
+      "kill-session",
+      "new-shell",
+      "back",
+    ]);
+    expect(actions.find((entry) => entry.id === "attach-session")?.unavailableReason).toBe(
+      "There are no sessions.",
+    );
+    expect(actions.find((entry) => entry.id === "kill-session")?.tone).toBe("error");
+    expect(actions.find((entry) => entry.id === "new-shell")?.enabled).toBe(true);
+  });
+
+  test("builds one back action for output and a destructive kill confirmation", () => {
+    expect(buildSessionLogActions().map((entry) => entry.id)).toEqual(["back"]);
+    const confirm = buildKillSessionActions();
+    expect(confirm.map((entry) => entry.id)).toEqual(["confirm-kill-session", "back"]);
+    expect(confirm.find((entry) => entry.id === "confirm-kill-session")?.tone).toBe("error");
   });
 });

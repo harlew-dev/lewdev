@@ -1,8 +1,9 @@
-import { describeError } from "@lewdev/core";
+import { describeError, type LewdevApi, type TerminalSessionAttachHandle } from "@lewdev/core";
 import { EmbeddedTerminalRenderable } from "@opentui/core";
 import { extend } from "@opentui/react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { findReattachSession, LEWDEV_SESSION_NAME, nextShellSessionName } from "../sessions";
 import { colors } from "../theme";
 
 declare module "@opentui/react" {
@@ -13,68 +14,70 @@ declare module "@opentui/react" {
 
 extend({ "embedded-terminal": EmbeddedTerminalRenderable });
 
-export interface SshSessionHandle {
-  kill(): void;
+export interface TerminalSessionHandle {
+  detach(): void;
 }
 
-export interface SshExitResult {
-  status: number | null;
+export interface TerminalExitResult {
+  code: number | null;
+  signal?: string;
   error: string | null;
 }
 
-interface SshTerminalScreenProps {
-  argv: string[];
+interface SessionTerminalScreenProps {
+  api: LewdevApi;
+  sandboxId: string;
+  /** Attach to this exact session instead of resolving one. */
+  sessionId?: string;
+  /** Always create a fresh shell session instead of reattaching. */
+  newSession?: boolean;
   label: string;
   statusMessage: string | null;
-  onExit: (result: SshExitResult) => void;
-  onSessionChange: (session: SshSessionHandle | null) => void;
+  onExit: (result: TerminalExitResult) => void;
+  onSessionChange: (session: TerminalSessionHandle | null) => void;
 }
 
-function buildEnvironment(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) {
-      env[key] = value;
-    }
+function closeHandle(handle: TerminalSessionAttachHandle): void {
+  try {
+    handle.close();
+  } catch {
+    // The stream already dropped or the session exited.
   }
-  env.TERM = "xterm-256color";
-  return env;
 }
-
-const SSH_ENV = buildEnvironment();
 
 /**
- * Runs ssh in a pseudo-terminal and paints it with the OpenTUI embedded
- * terminal. The focused renderable receives every key and paste, so the app's
- * global keyboard handler must stay out of the way while this page is open.
- *
- * The PTY is created inline by Bun.spawn so the child gets a controlling tty
- * (ssh needs it for host-key prompts and SIGWINCH). Writing and resizing go
- * through child.terminal.
+ * Attaches to an AerolVM terminal session and paints it with the OpenTUI
+ * embedded terminal. The focused renderable receives every key and paste, so
+ * the app's global keyboard handler must stay out of the way while this page is
+ * open. Detaching closes the attach stream; the session keeps running.
  */
-export function SshTerminalScreen({
-  argv,
+export function SessionTerminalScreen({
+  api,
+  sandboxId,
+  sessionId,
+  newSession,
   label,
   statusMessage,
   onExit,
   onSessionChange,
-}: SshTerminalScreenProps) {
+}: SessionTerminalScreenProps) {
   const emulatorRef = useRef<EmbeddedTerminalRenderable | null>(null);
-  const ptyRef = useRef<Bun.Terminal | null>(null);
+  const attachRef = useRef<TerminalSessionAttachHandle | null>(null);
+  const [connecting, setConnecting] = useState(true);
 
   const handleData = useCallback((data: Uint8Array) => {
     try {
-      ptyRef.current?.write(data);
+      attachRef.current?.write(data);
     } catch {
-      // The PTY closed between the key and the write.
+      // The attach stream closed between the key and the write.
     }
   }, []);
 
   const handleResize = useCallback((cols: number, rows: number) => {
     try {
-      ptyRef.current?.resize(cols, rows);
+      attachRef.current?.resize(cols, rows);
     } catch {
-      // The PTY closed before the layout settled.
+      // The attach stream closed before the layout settled.
     }
   }, []);
 
@@ -89,7 +92,7 @@ export function SshTerminalScreen({
   useEffect(() => {
     const emulator = emulatorRef.current;
     if (!emulator) {
-      onExit({ status: null, error: "The embedded terminal could not be created." });
+      onExit({ code: null, error: "The embedded terminal could not be created." });
       return;
     }
 
@@ -97,91 +100,114 @@ export function SshTerminalScreen({
       cols: Math.max(1, Math.floor(emulator.width) || 80),
       rows: Math.max(1, Math.floor(emulator.height) || 24),
     });
-    const initial = size();
 
-    let child: Bun.Subprocess | null = null;
     let closed = false;
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let detaching = false;
+    let reported = false;
+    let handle: TerminalSessionAttachHandle | null = null;
 
-    const kill = () => {
-      closed = true;
+    const write = (chunk: Uint8Array) => {
+      if (closed) {
+        return;
+      }
       try {
-        child?.kill();
+        emulator.write(chunk);
       } catch {
-        // The process already exited.
+        // The renderable was removed while output was in flight.
       }
     };
 
-    try {
-      child = Bun.spawn(argv, {
-        env: SSH_ENV,
-        terminal: {
+    const finish = (result: TerminalExitResult) => {
+      if (closed || detaching || reported) {
+        return;
+      }
+      reported = true;
+      onSessionChange(null);
+      onExit(result);
+    };
+
+    const run = async () => {
+      try {
+        let targetId = sessionId;
+        if (targetId === undefined) {
+          const sessions = await api.listSessions(sandboxId);
+          if (closed) {
+            return;
+          }
+          if (newSession === true) {
+            const created = await api.createSession(sandboxId, {
+              name: nextShellSessionName(sessions),
+              pty: true,
+              workDir: "/root",
+              ...size(),
+            });
+            targetId = created.id;
+          } else {
+            const existing = findReattachSession(sessions);
+            if (existing) {
+              targetId = existing.id;
+            } else {
+              const created = await api.createSession(sandboxId, {
+                name: LEWDEV_SESSION_NAME,
+                pty: true,
+                workDir: "/root",
+                ...size(),
+              });
+              targetId = created.id;
+            }
+          }
+        }
+        if (closed) {
+          return;
+        }
+
+        const initial = size();
+        const attached = api.attachSession(sandboxId, targetId, {
           cols: initial.cols,
           rows: initial.rows,
-          data(_terminal, data) {
-            if (closed) {
-              return;
-            }
-            try {
-              emulator.write(data);
-            } catch {
-              // The renderable was removed while output was in flight.
-            }
-          },
-        },
-      });
-      ptyRef.current = child.terminal ?? null;
-      onSessionChange({ kill });
-
-      // Forward the real size once the first layout pass has settled.
-      resizeTimer = setTimeout(() => {
-        const next = size();
-        try {
-          child?.terminal?.resize(next.cols, next.rows);
-        } catch {
-          // The PTY closed before the first layout pass.
-        }
-      }, 0);
-
-      void child.exited
-        .then((status) => {
-          ptyRef.current = null;
-          if (!closed) {
-            onExit({ status, error: null });
-          }
-        })
-        .catch((error: unknown) => {
-          ptyRef.current = null;
-          if (!closed) {
-            onExit({ status: null, error: describeError(error) });
-          }
+          onStdout: write,
+          onStderr: write,
         });
-    } catch (error) {
-      closed = true;
-      onSessionChange(null);
-      ptyRef.current = null;
-      onExit({ status: null, error: describeError(error) });
-    }
+        handle = attached;
+        attachRef.current = attached;
+        setConnecting(false);
+        if (closed) {
+          closeHandle(attached);
+          return;
+        }
+        onSessionChange({
+          detach: () => {
+            detaching = true;
+            closeHandle(attached);
+          },
+        });
+        void attached.done
+          .then((info) => {
+            finish({
+              code: info.code,
+              ...(info.signal === undefined ? {} : { signal: info.signal }),
+              error: null,
+            });
+          })
+          .catch((error: unknown) => {
+            finish({ code: null, error: describeError(error) });
+          });
+      } catch (error) {
+        finish({ code: null, error: describeError(error) });
+      }
+    };
+
+    void run();
 
     return () => {
       closed = true;
-      if (resizeTimer !== null) {
-        clearTimeout(resizeTimer);
-      }
+      attachRef.current = null;
       onSessionChange(null);
-      ptyRef.current = null;
-      try {
-        child?.kill();
-      } catch {
-        // The process already exited.
-      }
-      try {
-        child?.terminal?.close();
-      } catch {
-        // The PTY is already closed.
+      if (handle !== null) {
+        closeHandle(handle);
       }
     };
-  }, [argv, onExit, onSessionChange]);
+  }, [api, sandboxId, sessionId, newSession, onExit, onSessionChange]);
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={3}>
@@ -189,7 +215,7 @@ export function SshTerminalScreen({
         border
         borderStyle="rounded"
         borderColor={colors.border}
-        title={`ssh ${label}`}
+        title={`Terminal · ${label}`}
         titleColor={colors.accent}
         flexDirection="column"
         flexGrow={1}
@@ -210,6 +236,10 @@ export function SshTerminalScreen({
           <text fg={colors.warning} wrapMode="word">
             {statusMessage}
           </text>
+        </box>
+      ) : connecting ? (
+        <box flexShrink={0} paddingTop={1}>
+          <text fg={colors.muted}>Connecting to session…</text>
         </box>
       ) : null}
     </box>

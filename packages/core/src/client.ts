@@ -2,6 +2,7 @@ import {
   type BinaryLike,
   type CallOptions,
   type CreateOptions,
+  type CreateSessionOptions,
   type CreateSnapshotOptions,
   type ExecRequest,
   type ExecResult,
@@ -22,6 +23,9 @@ import {
   type ResizeOptions,
   type SandboxSnapshot,
   type SandboxStatus,
+  type Session,
+  type SessionAttachHandle,
+  type SessionAttachOptions,
   type SnapshotList,
   type TeamQuota,
   type UploadFileOptions,
@@ -55,6 +59,57 @@ export interface SdkExecStreamHandle {
   write(data: Uint8Array | string): void;
   resize(cols: number, rows: number): void;
   signal(name: string): void;
+  close(): void;
+  done: Promise<{ code: number; signal?: string }>;
+}
+
+/** A background terminal session. It keeps running when no client is attached. */
+export type TerminalSessionStatus = "running" | "exited" | "killed" | "failed";
+
+/** A terminal session, detached from the SDK's wire type. */
+export interface TerminalSession {
+  id: string;
+  name: string;
+  argv: string[];
+  workDir?: string;
+  pty: boolean;
+  status: TerminalSessionStatus;
+  exitCode: number;
+  exitSignal?: string;
+  createdAt: string;
+  startedAt: string;
+  exitedAt?: string;
+  recording: boolean;
+  bytes: number;
+  attached: number;
+}
+
+/** Options for starting a terminal session. A PTY session with no command is a login shell. */
+export interface CreateTerminalSessionInput {
+  name?: string;
+  command?: string;
+  argv?: string[];
+  workDir?: string;
+  env?: Record<string, string>;
+  pty?: boolean;
+  cols?: number;
+  rows?: number;
+}
+
+export interface TerminalSessionAttachOptions {
+  onStdout?: (chunk: Uint8Array) => void;
+  onStderr?: (chunk: Uint8Array) => void;
+  onExit?: (info: { code: number; signal?: string }) => void;
+  onError?: (message: string) => void;
+  cols?: number;
+  rows?: number;
+}
+
+export interface TerminalSessionAttachHandle {
+  write(data: Uint8Array | string): void;
+  resize(cols: number, rows: number): void;
+  signal(name: string): void;
+  /** Detach without killing the session. */
   close(): void;
   done: Promise<{ code: number; signal?: string }>;
 }
@@ -148,6 +203,20 @@ export interface AerolSdk {
   resize(id: string, options: ResizeOptions, call?: CallOptions): Promise<SdkSandbox>;
   updateLifecycle(id: string, lifecycle: Lifecycle, call?: CallOptions): Promise<SdkSandbox>;
   health(call?: CallOptions): Promise<HealthStatus>;
+  createSession(id: string, options: CreateSessionOptions, call?: CallOptions): Promise<Session>;
+  listSessions(id: string, call?: CallOptions): Promise<Session[]>;
+  getSession(id: string, sessionID: string, call?: CallOptions): Promise<Session>;
+  deleteSession(id: string, sessionID: string, call?: CallOptions): Promise<void>;
+  signalSession(id: string, sessionID: string, signal: string, call?: CallOptions): Promise<void>;
+  resizeSession(
+    id: string,
+    sessionID: string,
+    cols: number,
+    rows: number,
+    call?: CallOptions,
+  ): Promise<void>;
+  sessionLog(id: string, sessionID: string, call?: CallOptions): Promise<Uint8Array>;
+  attachSession(id: string, sessionID: string, options?: SessionAttachOptions): SessionAttachHandle;
   createSnapshot(
     id: string,
     name: string,
@@ -449,6 +518,54 @@ function toInfo(sandbox: SdkSandbox): SandboxInfo {
   };
 }
 
+function toTerminalSession(session: Session): TerminalSession {
+  return {
+    id: session.id,
+    name: session.name,
+    argv: [...session.argv],
+    ...(session.workDir === undefined ? {} : { workDir: session.workDir }),
+    pty: session.pty,
+    status: session.status,
+    exitCode: session.exitCode,
+    ...(session.exitSignal === undefined ? {} : { exitSignal: session.exitSignal }),
+    createdAt: session.createdAt,
+    startedAt: session.startedAt,
+    ...(session.exitedAt === undefined ? {} : { exitedAt: session.exitedAt }),
+    recording: session.recording,
+    bytes: session.bytes,
+    attached: session.attached,
+  };
+}
+
+function toSdkCreateSessionOptions(input: CreateTerminalSessionInput): CreateSessionOptions {
+  const options: CreateSessionOptions = {};
+  if (input.name !== undefined) {
+    options.name = input.name;
+  }
+  if (input.command !== undefined) {
+    options.command = input.command;
+  }
+  if (input.argv !== undefined) {
+    options.argv = [...input.argv];
+  }
+  if (input.workDir !== undefined) {
+    options.workDir = input.workDir;
+  }
+  if (input.env !== undefined) {
+    options.env = { ...input.env };
+  }
+  if (input.pty !== undefined) {
+    options.pty = input.pty;
+  }
+  if (input.cols !== undefined) {
+    options.cols = input.cols;
+  }
+  if (input.rows !== undefined) {
+    options.rows = input.rows;
+  }
+  return options;
+}
+
 function toDetails(sandbox: SdkSandbox): SandboxDetails {
   return {
     ...toInfo(sandbox),
@@ -646,6 +763,66 @@ export class LewdevApi {
       write: (data) => handle.write(data),
       close: () => handle.close(),
       signal: (name) => handle.signal(name),
+      done: handle.done.then((info: { code: number; signal?: string }) => ({
+        code: info.code,
+        ...(info.signal === undefined ? {} : { signal: info.signal }),
+      })),
+    };
+  }
+
+  async createSession(
+    id: string,
+    input: CreateTerminalSessionInput = {},
+  ): Promise<TerminalSession> {
+    return toTerminalSession(await this.sdk.createSession(id, toSdkCreateSessionOptions(input)));
+  }
+
+  async listSessions(id: string): Promise<TerminalSession[]> {
+    const sessions = await this.sdk.listSessions(id);
+    return sessions.map(toTerminalSession);
+  }
+
+  async getSession(id: string, sessionID: string): Promise<TerminalSession> {
+    return toTerminalSession(await this.sdk.getSession(id, sessionID));
+  }
+
+  /** Stops the session's program at once and removes the session. */
+  async deleteSession(id: string, sessionID: string): Promise<void> {
+    await this.sdk.deleteSession(id, sessionID);
+  }
+
+  async signalSession(id: string, sessionID: string, signal: string): Promise<void> {
+    await this.sdk.signalSession(id, sessionID, signal);
+  }
+
+  async resizeSession(id: string, sessionID: string, cols: number, rows: number): Promise<void> {
+    await this.sdk.resizeSession(id, sessionID, cols, rows);
+  }
+
+  /** The session's recent output, up to the server's 1 MB log. */
+  async sessionLog(id: string, sessionID: string): Promise<Uint8Array> {
+    return this.sdk.sessionLog(id, sessionID);
+  }
+
+  /** Attaches and returns a handle that can detach without killing the session. */
+  attachSession(
+    id: string,
+    sessionID: string,
+    options: TerminalSessionAttachOptions = {},
+  ): TerminalSessionAttachHandle {
+    const handle = this.sdk.attachSession(id, sessionID, {
+      ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
+      ...(options.onStderr === undefined ? {} : { onStderr: options.onStderr }),
+      ...(options.onExit === undefined ? {} : { onExit: options.onExit }),
+      ...(options.onError === undefined ? {} : { onError: options.onError }),
+      ...(options.cols === undefined ? {} : { cols: options.cols }),
+      ...(options.rows === undefined ? {} : { rows: options.rows }),
+    });
+    return {
+      write: (data) => handle.write(data),
+      resize: (cols, rows) => handle.resize(cols, rows),
+      signal: (name) => handle.signal(name),
+      close: () => handle.close(),
       done: handle.done.then((info: { code: number; signal?: string }) => ({
         code: info.code,
         ...(info.signal === undefined ? {} : { signal: info.signal }),

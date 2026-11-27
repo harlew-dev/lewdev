@@ -30,7 +30,14 @@ export type Page =
   | ({ kind: "delete-sandbox" } & SandboxPageTarget)
   | ({ kind: "trust-hosts" } & SandboxPageTarget)
   | ({ kind: "forget-host" } & SandboxPageTarget)
-  | ({ kind: "ssh-terminal" } & SandboxPageTarget);
+  | ({ kind: "sessions" } & SandboxPageTarget)
+  | ({
+      kind: "ssh-terminal";
+      sessionId?: string;
+      newSession?: boolean;
+    } & SandboxPageTarget)
+  | ({ kind: "session-log"; sessionId: string; sessionName: string } & SandboxPageTarget)
+  | ({ kind: "kill-session"; sessionId: string; sessionName: string } & SandboxPageTarget);
 
 export const ROOT_PAGE: Page = { kind: "sandboxes" };
 export const SNAPSHOTS_PAGE: Page = { kind: "snapshots" };
@@ -62,7 +69,10 @@ const CRUMB_LABELS: Record<Page["kind"], string | null> = {
   "delete-sandbox": "Delete sandbox",
   "trust-hosts": "Trust host keys",
   "forget-host": "Forget host key",
-  "ssh-terminal": "SSH terminal",
+  sessions: "Sessions",
+  "ssh-terminal": "Terminal",
+  "session-log": "Session output",
+  "kill-session": "Kill session",
 };
 
 export function currentPage(stack: Page[]): Page {
@@ -119,7 +129,7 @@ export function breadcrumbTrail(stack: Page[]): string[] {
 }
 
 /**
- * Leaves the SSH terminal and lands on the sandbox page for that sandbox. If
+ * Leaves the terminal and lands on the sandbox page for that sandbox. If
  * the stack has no sandbox page, one is pushed so the user always ends up
  * where the session belongs.
  */

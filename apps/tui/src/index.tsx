@@ -65,7 +65,8 @@ Keys:
   Sandbox list: n new · c connect · q quit
   Sandbox page: enter runs the selected action
   Ports page: o open port · x close port
-  SSH session: ctrl+] closes the session
+  Sessions page: enter attach · v output · k kill · n new shell
+  Terminal: ctrl+] detaches; the session keeps running
 
 Private sandbox keys are stored in the same config directory under keys/.
 `;

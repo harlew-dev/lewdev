@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   CallOptions,
   CreateOptions,
+  CreateSessionOptions,
   CreateSnapshotOptions,
   ExposePortOptions,
   ExposeResult,
@@ -12,6 +13,9 @@ import type {
   RegisterSnapshotOptions,
   ResizeOptions,
   SandboxSnapshot,
+  Session,
+  SessionAttachHandle,
+  SessionAttachOptions,
   SnapshotList,
   TeamQuota,
   WhoAmI,
@@ -109,6 +113,23 @@ function snapshot(overrides: Partial<SandboxSnapshot> = {}): SandboxSnapshot {
   };
 }
 
+function session(overrides: Partial<Session> = {}): Session {
+  return {
+    id: "ses-0123456789abcdef",
+    name: "lewdev",
+    argv: ["bash", "-l"],
+    pty: true,
+    status: "running",
+    exitCode: 0,
+    createdAt,
+    startedAt: createdAt,
+    recording: false,
+    bytes: 0,
+    attached: 0,
+    ...overrides,
+  };
+}
+
 function fakeSdk(
   options: {
     create?: (options: CreateOptions) => SdkSandbox;
@@ -128,6 +149,18 @@ function fakeSdk(
     deleteSnapshot?: (name: string) => void;
     whoami?: WhoAmI;
     getTeamQuota?: (team: string) => TeamQuota;
+    createSession?: (id: string, sessionOptions: CreateSessionOptions) => Session;
+    listSessions?: (id: string) => Session[];
+    getSession?: (id: string, sessionID: string) => Session;
+    deleteSession?: (id: string, sessionID: string) => void;
+    signalSession?: (id: string, sessionID: string, signal: string) => void;
+    resizeSession?: (id: string, sessionID: string, cols: number, rows: number) => void;
+    sessionLog?: (id: string, sessionID: string) => Uint8Array;
+    attachSession?: (
+      id: string,
+      sessionID: string,
+      attachOptions?: SessionAttachOptions,
+    ) => SessionAttachHandle;
   } = {},
 ): { sdk: AerolSdk; calls: Call[] } {
   const calls: Call[] = [];
@@ -174,6 +207,55 @@ function fakeSdk(
           caddy: "ok",
           sshGateway: "ok",
           version: "0.8.3",
+        }
+      );
+    },
+    createSession: async (id: string, sessionOptions: CreateSessionOptions): Promise<Session> => {
+      calls.push({ method: "createSession", args: [id, sessionOptions] });
+      return options.createSession?.(id, sessionOptions) ?? session();
+    },
+    listSessions: async (id: string): Promise<Session[]> => {
+      calls.push({ method: "listSessions", args: [id] });
+      return options.listSessions?.(id) ?? [];
+    },
+    getSession: async (id: string, sessionID: string): Promise<Session> => {
+      calls.push({ method: "getSession", args: [id, sessionID] });
+      return options.getSession?.(id, sessionID) ?? session({ id: sessionID });
+    },
+    deleteSession: async (id: string, sessionID: string): Promise<void> => {
+      calls.push({ method: "deleteSession", args: [id, sessionID] });
+      options.deleteSession?.(id, sessionID);
+    },
+    signalSession: async (id: string, sessionID: string, signal: string): Promise<void> => {
+      calls.push({ method: "signalSession", args: [id, sessionID, signal] });
+      options.signalSession?.(id, sessionID, signal);
+    },
+    resizeSession: async (
+      id: string,
+      sessionID: string,
+      cols: number,
+      rows: number,
+    ): Promise<void> => {
+      calls.push({ method: "resizeSession", args: [id, sessionID, cols, rows] });
+      options.resizeSession?.(id, sessionID, cols, rows);
+    },
+    sessionLog: async (id: string, sessionID: string): Promise<Uint8Array> => {
+      calls.push({ method: "sessionLog", args: [id, sessionID] });
+      return options.sessionLog?.(id, sessionID) ?? new Uint8Array();
+    },
+    attachSession: (
+      id: string,
+      sessionID: string,
+      attachOptions?: SessionAttachOptions,
+    ): SessionAttachHandle => {
+      calls.push({ method: "attachSession", args: [id, sessionID, attachOptions] });
+      return (
+        options.attachSession?.(id, sessionID, attachOptions) ?? {
+          write: () => {},
+          resize: () => {},
+          signal: () => {},
+          close: () => {},
+          done: Promise.resolve({ code: 0 }),
         }
       );
     },
@@ -844,6 +926,155 @@ describe("LewdevApi snapshots", () => {
     const api = new LewdevApi(sdk);
     await api.deleteSnapshot("  golden  ");
     expect(calls[0]).toEqual({ method: "deleteSnapshot", args: ["golden"] });
+  });
+});
+
+describe("LewdevApi sessions", () => {
+  test("maps every session field", async () => {
+    const { sdk, calls } = fakeSdk({
+      listSessions: () => [
+        session({
+          id: "ses-abc",
+          name: "lewdev-2",
+          argv: ["sh", "-l"],
+          workDir: "/root",
+          pty: false,
+          status: "exited",
+          exitCode: 7,
+          exitSignal: "TERM",
+          exitedAt: createdAt,
+          recording: true,
+          bytes: 4096,
+          attached: 2,
+        }),
+      ],
+    });
+    const api = new LewdevApi(sdk);
+
+    const sessions = await api.listSessions("sb-abc");
+    expect(calls[0]).toEqual({ method: "listSessions", args: ["sb-abc"] });
+    expect(sessions).toEqual([
+      {
+        id: "ses-abc",
+        name: "lewdev-2",
+        argv: ["sh", "-l"],
+        workDir: "/root",
+        pty: false,
+        status: "exited",
+        exitCode: 7,
+        exitSignal: "TERM",
+        createdAt,
+        startedAt: createdAt,
+        exitedAt: createdAt,
+        recording: true,
+        bytes: 4096,
+        attached: 2,
+      },
+    ]);
+  });
+
+  test("creates a session with only the supplied options", async () => {
+    const { sdk, calls } = fakeSdk({
+      createSession: (_id, sessionOptions) =>
+        session({ name: sessionOptions.name ?? "", pty: sessionOptions.pty ?? false }),
+    });
+    const api = new LewdevApi(sdk);
+
+    const created = await api.createSession("sb-abc", {
+      name: "lewdev",
+      pty: true,
+      workDir: "/root",
+      cols: 120,
+      rows: 40,
+    });
+
+    expect(calls[0]).toEqual({
+      method: "createSession",
+      args: ["sb-abc", { name: "lewdev", pty: true, workDir: "/root", cols: 120, rows: 40 }],
+    });
+    expect(created.name).toBe("lewdev");
+    expect(created.pty).toBe(true);
+  });
+
+  test("does not send optional session fields that were left out", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+    await api.createSession("sb-abc");
+    expect(calls[0]).toEqual({ method: "createSession", args: ["sb-abc", {}] });
+  });
+
+  test("forwards get, delete, signal and resize session calls", async () => {
+    const { sdk, calls } = fakeSdk();
+    const api = new LewdevApi(sdk);
+
+    await api.getSession("sb-abc", "ses-1");
+    await api.deleteSession("sb-abc", "ses-2");
+    await api.signalSession("sb-abc", "ses-3", "TERM");
+    await api.resizeSession("sb-abc", "ses-4", 100, 30);
+
+    expect(calls).toEqual([
+      { method: "getSession", args: ["sb-abc", "ses-1"] },
+      { method: "deleteSession", args: ["sb-abc", "ses-2"] },
+      { method: "signalSession", args: ["sb-abc", "ses-3", "TERM"] },
+      { method: "resizeSession", args: ["sb-abc", "ses-4", 100, 30] },
+    ]);
+  });
+
+  test("reads session log bytes", async () => {
+    const output = new TextEncoder().encode("hello");
+    const { sdk, calls } = fakeSdk({ sessionLog: () => output });
+    const api = new LewdevApi(sdk);
+
+    expect(await api.sessionLog("sb-abc", "ses-1")).toEqual(output);
+    expect(calls[0]).toEqual({ method: "sessionLog", args: ["sb-abc", "ses-1"] });
+  });
+
+  test("forwards attach callbacks and handle methods", async () => {
+    const written: Array<Uint8Array | string> = [];
+    const resized: Array<[number, number]> = [];
+    const signals: string[] = [];
+    let closed = 0;
+    let received: SessionAttachOptions | undefined;
+    const { sdk, calls } = fakeSdk({
+      attachSession: (_id, _sessionID, attachOptions) => {
+        received = attachOptions;
+        return {
+          write: (data) => written.push(data),
+          resize: (cols, rows) => resized.push([cols, rows]),
+          signal: (name) => signals.push(name),
+          close: () => {
+            closed += 1;
+          },
+          done: Promise.resolve({ code: 3, signal: "TERM" }),
+        };
+      },
+    });
+    const api = new LewdevApi(sdk);
+    const onStdout = () => {};
+    const onStderr = () => {};
+
+    const handle = api.attachSession("sb-abc", "ses-1", {
+      onStdout,
+      onStderr,
+      cols: 80,
+      rows: 24,
+    });
+    handle.write("ls\n");
+    handle.resize(100, 30);
+    handle.signal("INT");
+    handle.close();
+
+    expect(calls[0]).toEqual({
+      method: "attachSession",
+      args: ["sb-abc", "ses-1", { onStdout, onStderr, cols: 80, rows: 24 }],
+    });
+    expect(received?.onStdout).toBe(onStdout);
+    expect(received?.onStderr).toBe(onStderr);
+    expect(written).toEqual(["ls\n"]);
+    expect(resized).toEqual([[100, 30]]);
+    expect(signals).toEqual(["INT"]);
+    expect(closed).toBe(1);
+    expect(await handle.done).toEqual({ code: 3, signal: "TERM" });
   });
 });
 

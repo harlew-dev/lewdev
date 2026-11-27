@@ -48,6 +48,13 @@ describe("page stack", () => {
     expect(pageSandbox({ kind: "create-snapshot", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "confirm-create-snapshot", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "ssh-terminal", ...myBox })).toEqual(myBox);
+    expect(pageSandbox({ kind: "sessions", ...myBox })).toEqual(myBox);
+    expect(
+      pageSandbox({ kind: "session-log", ...myBox, sessionId: "ses-1", sessionName: "shell" }),
+    ).toEqual(myBox);
+    expect(
+      pageSandbox({ kind: "kill-session", ...myBox, sessionId: "ses-1", sessionName: "shell" }),
+    ).toEqual(myBox);
     expect(pageSandbox({ kind: "trust-hosts", ...myBox })).toEqual(myBox);
     expect(pageSandbox({ kind: "forget-host", ...myBox })).toEqual(myBox);
   });
@@ -87,7 +94,10 @@ describe("breadcrumbs", () => {
     ).toEqual(["Sandboxes", "my-box", "Delete sandbox"]);
     expect(
       breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "ssh-terminal", ...myBox })),
-    ).toEqual(["Sandboxes", "my-box", "SSH terminal"]);
+    ).toEqual(["Sandboxes", "my-box", "Terminal"]);
+    expect(
+      breadcrumbTrail(stackOf({ kind: "sandbox", ...myBox }, { kind: "sessions", ...myBox })),
+    ).toEqual(["Sandboxes", "my-box", "Sessions"]);
     expect(
       breadcrumbTrail(
         stackOf(
@@ -140,7 +150,7 @@ describe("breadcrumbs", () => {
   });
 });
 
-describe("leaving the SSH terminal", () => {
+describe("leaving the terminal", () => {
   test("lands on the existing sandbox page", () => {
     const stack = stackOf({ kind: "sandbox", ...myBox }, { kind: "ssh-terminal", ...myBox });
     expect(backFromTerminal(stack, myBox).map((page) => page.kind)).toEqual([

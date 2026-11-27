@@ -22,6 +22,11 @@ export type {
   SdkSandbox,
   SnapshotInfo,
   TeamQuotaInfo,
+  CreateTerminalSessionInput,
+  TerminalSession,
+  TerminalSessionAttachHandle,
+  TerminalSessionAttachOptions,
+  TerminalSessionStatus,
 } from "./client.js";
 export {
   LewdevApi,

@@ -32,13 +32,16 @@ Bun may not be on `PATH` in non-login shells; use `~/.bun/bin/bun` when needed.
 - SDK calls go through `packages/core/src/client.ts`. The `AerolSdk` interface exists so tests can
   inject a fake instead of contacting a server.
 - The TUI must not crash on SDK or filesystem errors: show an inline message or toast.
-- The embedded terminal uses the AerolVM gateway's session-only SSH on port 2220 with the system
-  `ssh` binary:
-  `-i <gateway-key> -p 2220 -o IdentitiesOnly=yes -o UserKnownHostsFile=<config-dir>/known_hosts <sandbox-id>@<host>`,
-  run in a PTY inside the TUI. The host comes from the configured API URL's hostname. lewdev keeps
-  gateway host keys in its own private `known_hosts` and never edits `~/.ssh/known_hosts`; "Trust
-  gateway host keys" scans every gateway node with `ssh-keyscan` and saves each key, and "Forget
-  saved host key" clears them with `ssh-keygen -R`, both behind a confirmation.
+- The embedded terminal uses AerolVM terminal sessions over the API, not the system `ssh` binary.
+  "Open terminal" attaches to the newest running PTY session named `lewdev`, or creates one
+  (login shell, `/root`, sized to the panel). Ctrl+] detaches and the session keeps running; Open
+  terminal reattaches. The Terminal group's Sessions page lists sessions, shows `sessionLog`
+  output, kills one behind a confirmation, and starts extra numbered `lewdev-N` shells. It needs a
+  running sandbox with a shell runtime; WASM and isolate sandboxes answer 501.
+- The gateway SSH helpers remain for `lewdev ssh` (CLI) and SSH Settings. lewdev keeps gateway host
+  keys in its own private `known_hosts` and never edits `~/.ssh/known_hosts`; "Trust gateway host
+  keys" scans every gateway node with `ssh-keyscan` and saves each key, and "Forget saved host key"
+  clears them with `ssh-keygen -R`, both behind a confirmation.
 - Direct SSH (VS Code Remote-SSH, plain `ssh`, Cursor, JetBrains) defaults to a private connection:
   no exposed port. The `Host lewdev-<id>` block uses `ProxyCommand` to run
   `lewdev ssh-proxy <id>`, which bridges SSH's stdin/stdout to `exec /usr/sbin/sshd -i` in the

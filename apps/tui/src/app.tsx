@@ -4,7 +4,6 @@ import {
   addSshInclude,
   type AuthorizedKey,
   backgroundUpdateCheck,
-  buildSshArgv,
   cleanupDirectSsh,
   completeRemotePath,
   type CreateSandboxInput,
@@ -18,7 +17,6 @@ import {
   disableDirectSsh,
   directKeyExists,
   enablePublicDirectSsh,
-  ensureKnownHostsFile,
   ensureSshdRunning,
   openInVscode,
   forgetHostKey,
@@ -65,10 +63,11 @@ import {
   summarizeUsage,
   switchToPrivateSsh,
   type TeamQuotaInfo,
+  type TerminalSession,
   type UpdateNotice,
   type UsageSummary,
 } from "@lewdev/core";
-import type { KeyEvent } from "@opentui/core";
+import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { decodePasteBytes } from "@opentui/core";
 import { useKeyboard, usePaste, useRenderer } from "@opentui/react";
 import { readFile, stat } from "node:fs/promises";
@@ -97,10 +96,13 @@ import {
   buildAddSshKeyActions,
   buildDisableSshActions,
   buildEnablePublicSshActions,
+  buildKillSessionActions,
   buildRemoveSshKeyActions,
   buildResetSshActions,
   buildResizeActions,
   buildSandboxPageGroups,
+  buildSessionLogActions,
+  buildSessionsPageActions,
   buildSetupSshActions,
   buildSnapshotDeleteActions,
   buildSnapshotListActions,
@@ -198,6 +200,7 @@ import {
   resizeValuesFromDetails,
 } from "./resize-form";
 import { LifecycleScreen } from "./screens/lifecycle";
+import { KillSessionScreen } from "./screens/kill-session";
 import { ResizeScreen } from "./screens/resize";
 import { EnablePublicSshScreen } from "./screens/enable-public-ssh";
 import { ForgetHostScreen } from "./screens/forget-host";
@@ -209,6 +212,8 @@ import { PORT_PROTOCOL_OPTIONS, PORT_VISIBILITY_OPTIONS, portAddress } from "./p
 import { PortsScreen } from "./screens/ports";
 import { RemoveSshKeyScreen } from "./screens/remove-ssh-key";
 import { ResetSshScreen } from "./screens/reset-ssh";
+import { SessionLogScreen } from "./screens/session-log";
+import { SessionsScreen } from "./screens/sessions";
 import { SnapshotDetailsScreen } from "./screens/snapshot-details";
 import { SnapshotsScreen } from "./screens/snapshots";
 import { SetupSshScreen, type SetupSteps } from "./screens/setup-ssh";
@@ -217,10 +222,11 @@ import { SshIncludeScreen } from "./screens/ssh-include";
 import { VscodeDirectoryScreen } from "./screens/vscode-directory";
 import { TrustHostsScreen } from "./screens/trust-hosts";
 import {
-  type SshExitResult,
-  type SshSessionHandle,
-  SshTerminalScreen,
+  SessionTerminalScreen,
+  type TerminalExitResult,
+  type TerminalSessionHandle,
 } from "./screens/ssh-terminal";
+import { tailSessionLog } from "./sessions";
 import {
   createSnapshotNeedsConfirmation,
   createValuesFromSnapshot,
@@ -295,8 +301,6 @@ function portFields(form: PortFormValues): [PortFormValues["field"], ...PortForm
     : ["protocol", "port", "visibility", "submit"];
 }
 
-const NO_KEY_REASON =
-  "No private key is stored for this sandbox. The key is only available for sandboxes created by lewdev.";
 const CLIPBOARD_ERROR =
   "Couldn't read the clipboard. Use your terminal's paste (usually Ctrl+Shift+V).";
 
@@ -453,6 +457,15 @@ export function App() {
   /** The sandbox action the user left from, restored when a sub-page pops back. */
   const sandboxActionRef = useRef<ActionId | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<TerminalSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [sessionSelected, setSessionSelected] = useState(0);
+  const [sessionLogLines, setSessionLogLines] = useState<string[]>([]);
+  const [sessionLogLoading, setSessionLogLoading] = useState(false);
+  const [sessionLogError, setSessionLogError] = useState<string | null>(null);
+  const sessionLogScrollRef = useRef<ScrollBoxRenderable | null>(null);
+  const [killSessionError, setKillSessionError] = useState<string | null>(null);
   const [hostKeyScan, setHostKeyScan] = useState<GatewayHostKeyScan | null>(null);
 
   const [directInfo, setDirectInfo] = useState<DirectSshInfo | null>(null);
@@ -472,13 +485,14 @@ export function App() {
   const [vscodeDir, setVscodeDir] = useState<VscodeDirState>(EMPTY_VSCODE_DIR);
   const lastVscodeDir = useRef<Record<string, string>>({});
 
-  const sshSession = useRef<SshSessionHandle | null>(null);
+  const terminalSession = useRef<TerminalSessionHandle | null>(null);
   const stackRef = useRef(stack);
   stackRef.current = stack;
 
   const page = currentPage(stack);
   const sandboxTarget = pageSandbox(page);
   const sandboxId = sandboxTarget?.id ?? null;
+  const sessionLogId = page.kind === "session-log" ? page.sessionId : null;
   const usesDetails =
     page.kind === "sandbox" ||
     page.kind === "resize" ||
@@ -611,6 +625,32 @@ export function App() {
     [api],
   );
 
+  const refreshSessions = useCallback(
+    async (showLoading = false): Promise<TerminalSession[]> => {
+      if (!api || !sandboxId) {
+        return [];
+      }
+      if (showLoading) {
+        setSessionsLoading(true);
+      }
+      try {
+        const items = await api.listSessions(sandboxId);
+        setSessions(items);
+        setSessionsError(null);
+        return items;
+      } catch (error) {
+        setSessions([]);
+        setSessionsError(describeError(error));
+        return [];
+      } finally {
+        if (showLoading) {
+          setSessionsLoading(false);
+        }
+      }
+    },
+    [api, sandboxId],
+  );
+
   const refreshDirectSshState = useCallback(
     async (id: string, checkRunning: boolean): Promise<void> => {
       try {
@@ -703,8 +743,12 @@ export function App() {
   );
 
   const quit = useCallback(() => {
-    sshSession.current?.kill();
-    sshSession.current = null;
+    try {
+      terminalSession.current?.detach();
+    } catch {
+      // The attach stream already closed.
+    }
+    terminalSession.current = null;
     renderer.destroy();
     process.exit(0);
   }, [renderer]);
@@ -836,6 +880,61 @@ export function App() {
     }
     void refreshSnapshots(false);
   }, [api, page.kind, refreshSnapshots]);
+
+  useEffect(() => {
+    if (!api || page.kind !== "sessions") {
+      return;
+    }
+    void refreshSessions(true);
+    const timer = setInterval(() => {
+      void refreshSessions(false);
+    }, 3000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [api, page.kind, refreshSessions]);
+
+  useEffect(() => {
+    setSessionSelected((previous) =>
+      sessions.length === 0 ? 0 : Math.min(previous, sessions.length - 1),
+    );
+  }, [sessions.length]);
+
+  useEffect(() => {
+    if (sessionLogId === null) {
+      setSessionLogLines([]);
+      setSessionLogError(null);
+      setSessionLogLoading(false);
+      return;
+    }
+    if (!api || !sandboxId) {
+      return;
+    }
+    let cancelled = false;
+    setSessionLogLoading(true);
+    setSessionLogError(null);
+    setSessionLogLines([]);
+    void api
+      .sessionLog(sandboxId, sessionLogId)
+      .then((bytes) => {
+        if (!cancelled) {
+          setSessionLogLines(tailSessionLog(bytes));
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setSessionLogError(describeError(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setSessionLogLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, sandboxId, sessionLogId]);
 
   useEffect(() => {
     if (snapshotPageName === null) {
@@ -1076,27 +1175,9 @@ export function App() {
     }
   }, [gatewayHost]);
 
-  const sshArgv = useMemo(() => {
-    if (page.kind !== "ssh-terminal" || !config) {
-      return null;
-    }
-    try {
-      return buildSshArgv({
-        sandboxId: page.id,
-        host: sshHostFromApiUrl(config.apiUrl),
-        keyPath: getKeyPath(page.id),
-        knownHostsPath: getKnownHostsPath(),
-      });
-    } catch {
-      return null;
-    }
-  }, [page, config]);
-
   const actions = useMemo<PageAction[]>(() => {
     const ctx = {
       status: pageDetails?.status ?? null,
-      keyAvailable: pageDetails !== null && keyAvailable,
-      sshCommandAvailable: gatewayHost !== null,
       hasShell,
       directReady,
       sshConfigured,
@@ -1175,14 +1256,21 @@ export function App() {
         return buildConnectActions({ canGoBack: config !== null });
       case "new-sandbox":
         return buildNewSandboxActions();
+      case "sessions":
+        return buildSessionsPageActions({
+          sessions,
+          selected: sessions[sessionSelected],
+        });
+      case "session-log":
+        return buildSessionLogActions();
+      case "kill-session":
+        return buildKillSessionActions();
       case "ssh-terminal":
         return [];
     }
   }, [
     page,
     pageDetails,
-    keyAvailable,
-    gatewayHost,
     config,
     portSelected,
     hasShell,
@@ -1196,6 +1284,9 @@ export function App() {
     setupMode,
     setupResult,
     setupError,
+    gatewayHost,
+    sessions,
+    sessionSelected,
   ]);
 
   const selectedActionIndex = actionIndex(actions, selectedActionId);
@@ -1281,7 +1372,62 @@ export function App() {
         return;
       }
       case "ssh":
-        void connectSsh();
+        openTerminal();
+        return;
+      case "sessions": {
+        const target = actionTarget();
+        if (target) {
+          setSessions([]);
+          setSessionsLoading(true);
+          setSessionSelected(0);
+          setSessionsError(null);
+          pushSandboxScoped({ kind: "sessions", ...target });
+        }
+        return;
+      }
+      case "attach-session": {
+        const target = actionTarget();
+        const session = sessions[sessionSelected];
+        if (target && session) {
+          pushSandboxScoped({ kind: "ssh-terminal", ...target, sessionId: session.id });
+        }
+        return;
+      }
+      case "view-session": {
+        const target = actionTarget();
+        const session = sessions[sessionSelected];
+        if (target && session) {
+          setSessionLogLines([]);
+          setSessionLogError(null);
+          pushSandboxScoped({
+            kind: "session-log",
+            ...target,
+            sessionId: session.id,
+            sessionName: session.name || "session",
+          });
+        }
+        return;
+      }
+      case "kill-session": {
+        const target = actionTarget();
+        const session = sessions[sessionSelected];
+        if (target && session) {
+          setKillSessionError(null);
+          pushSandboxScoped({
+            kind: "kill-session",
+            ...target,
+            sessionId: session.id,
+            sessionName: session.name || "session",
+          });
+          setSelectedActionId("back");
+        }
+        return;
+      }
+      case "confirm-kill-session":
+        void performKillSession();
+        return;
+      case "new-shell":
+        openTerminal({ newSession: true });
         return;
       case "ssh-info": {
         const target = actionTarget();
@@ -1532,34 +1678,26 @@ export function App() {
     })();
   }
 
-  async function connectSsh(): Promise<void> {
+  function openTerminal(options: { sessionId?: string; newSession?: boolean } = {}): void {
     const target = actionTarget();
-    if (!config || !target) {
+    if (!target) {
       return;
     }
-    try {
-      if (!(await privateKeyExists(target.id))) {
-        showToast("error", NO_KEY_REASON);
-        return;
-      }
-      await ensureKnownHostsFile();
-      buildSshArgv({
-        sandboxId: target.id,
-        host: sshHostFromApiUrl(config.apiUrl),
-        keyPath: getKeyPath(target.id),
-        knownHostsPath: getKnownHostsPath(),
-      });
-      pushSandboxScoped({ kind: "ssh-terminal", ...target });
-    } catch (error) {
-      showToast("error", describeError(error));
-    }
+    pushSandboxScoped({ kind: "ssh-terminal", ...target, ...options });
   }
 
-  function closeSshTerminal(): void {
+  function leaveTerminal(detached: boolean): void {
     const target = pageSandbox(page);
-    sshSession.current?.kill();
-    sshSession.current = null;
+    try {
+      terminalSession.current?.detach();
+    } catch {
+      // The attach stream already closed.
+    }
+    terminalSession.current = null;
     setTerminalStatus(null);
+    if (detached) {
+      showToast("info", "Detached. The session keeps running; Open terminal reattaches.");
+    }
     if (!target) {
       return;
     }
@@ -1567,37 +1705,28 @@ export function App() {
     setStack((previous) => backFromTerminal(previous, target));
     void refreshList(false);
     void loadDetails(target.id);
+    void refreshSessions(false);
   }
 
-  const handleSshExit = useCallback(
-    (result: SshExitResult) => {
-      const top = currentPage(stackRef.current);
-      if (top.kind !== "ssh-terminal") {
-        return;
-      }
-      if (result.error) {
-        const detail = result.error.replace(/\.\s*$/, "");
-        setTerminalStatus(`Session ended: ${detail}. Press esc or ctrl+] to go back.`);
-        return;
-      }
-      if (result.status !== null && result.status !== 0) {
-        setTerminalStatus(
-          `Session ended: ssh exited with status ${result.status}. Press esc or ctrl+] to go back.`,
-        );
-        return;
-      }
-      const target: SandboxPageTarget = { id: top.id, label: top.label };
-      setTerminalStatus(null);
-      setSelectedActionId(sandboxActionRef.current);
-      setStack((previous) => backFromTerminal(previous, target));
-      void refreshList(false);
-      void loadDetails(target.id);
-    },
-    [refreshList, loadDetails],
-  );
+  const handleTerminalExit = useCallback((result: TerminalExitResult) => {
+    const top = currentPage(stackRef.current);
+    if (top.kind !== "ssh-terminal") {
+      return;
+    }
+    if (result.error) {
+      const detail = result.error.replace(/\.\s*$/, "");
+      setTerminalStatus(`Terminal error: ${detail}. Press esc to go back.`);
+      return;
+    }
+    if (result.code !== null && result.code !== 0) {
+      setTerminalStatus(`Session ended with exit code ${result.code}. Press esc to go back.`);
+      return;
+    }
+    setTerminalStatus("Session ended. Press esc to go back.");
+  }, []);
 
-  const handleSessionChange = useCallback((session: SshSessionHandle | null) => {
-    sshSession.current = session;
+  const handleSessionChange = useCallback((session: TerminalSessionHandle | null) => {
+    terminalSession.current = session;
   }, []);
 
   function openSetupSsh(requestedMode?: DirectSshMode): void {
@@ -2549,6 +2678,27 @@ export function App() {
     }
   }
 
+  async function performKillSession(): Promise<void> {
+    if (page.kind !== "kill-session" || !api) {
+      return;
+    }
+    const sessionID = page.sessionId;
+    const name = page.sessionName;
+    setKillSessionError(null);
+    setBusyMessage(`Killing session ${name}…`);
+    try {
+      await api.deleteSession(page.id, sessionID);
+      await refreshSessions(false);
+      setSelectedActionId(null);
+      pop();
+      showToast("success", `Killed session ${name}.`);
+    } catch (error) {
+      setKillSessionError(describeError(error));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
   async function performDelete(): Promise<void> {
     const target = page.kind === "delete-sandbox" ? pageSandbox(page) : null;
     if (!target || !api) {
@@ -3001,9 +3151,14 @@ export function App() {
     if (page.kind === "ssh-terminal") {
       const pressed = actionKey(key);
       const ended = terminalStatus !== null;
-      if (pressed === "ctrl+]" || (ended && pressed === "esc")) {
+      if (pressed === "ctrl+]") {
         key.preventDefault();
-        closeSshTerminal();
+        leaveTerminal(!ended);
+        return;
+      }
+      if (ended && pressed === "esc") {
+        key.preventDefault();
+        leaveTerminal(false);
         return;
       }
       if (ended) {
@@ -3211,6 +3366,52 @@ export function App() {
       }
     }
 
+    if (page.kind === "sessions") {
+      const last = Math.max(0, sessions.length - 1);
+      if (key.name === "down" || actionKey(key) === "j") {
+        setSessionSelected((previous) => Math.min(previous + 1, last));
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        setSessionSelected((previous) => Math.max(previous - 1, 0));
+        return;
+      }
+    }
+
+    if (page.kind === "session-log") {
+      const scroll = sessionLogScrollRef.current;
+      if (key.name === "down" || actionKey(key) === "j") {
+        key.preventDefault();
+        scroll?.scrollBy(1);
+        return;
+      }
+      if (key.name === "up" || actionKey(key) === "k") {
+        key.preventDefault();
+        scroll?.scrollBy(-1);
+        return;
+      }
+      if (key.name === "pagedown") {
+        key.preventDefault();
+        scroll?.scrollBy(10);
+        return;
+      }
+      if (key.name === "pageup") {
+        key.preventDefault();
+        scroll?.scrollBy(-10);
+        return;
+      }
+      if (key.name === "home") {
+        key.preventDefault();
+        scroll?.scrollTo(0);
+        return;
+      }
+      if (key.name === "end") {
+        key.preventDefault();
+        scroll?.scrollTo(Number.POSITIVE_INFINITY);
+        return;
+      }
+    }
+
     if (page.kind === "add-ssh-key" && !key.ctrl && !key.meta) {
       if (key.name === "backspace" || key.name === "delete") {
         setNewSshKey((previous) => removeLastChar(previous));
@@ -3391,7 +3592,8 @@ export function App() {
       page.kind === "delete-snapshot" ||
       page.kind === "confirm-create-snapshot" ||
       page.kind === "trust-hosts" ||
-      page.kind === "forget-host"
+      page.kind === "forget-host" ||
+      page.kind === "kill-session"
     ) {
       if (key.name === "down" || actionKey(key) === "j") {
         moveAction(1);
@@ -3992,7 +4194,7 @@ export function App() {
             ["esc", "back"],
             ["ctrl+]", "back"],
           ]
-        : [["ctrl+]", "close session"]];
+        : [["ctrl+]", "detach"]];
     }
     if (page.kind === "sandboxes" || page.kind === "snapshots") {
       return actionHints(actions, {
@@ -4007,6 +4209,18 @@ export function App() {
     }
     if (page.kind === "ports") {
       return actionHints(actions, { extra: [["↑/↓", "move"]] });
+    }
+    if (page.kind === "sessions") {
+      return actionHints(actions, { extra: [["↑/↓", "session"]] });
+    }
+    if (page.kind === "session-log") {
+      return actionHints(actions, {
+        extra: [
+          ["↑/↓", "scroll"],
+          ["pgup/pgdn", "page"],
+          ["home/end", "top / bottom"],
+        ],
+      });
     }
     if (page.kind === "vscode-directory") {
       return [
@@ -4228,7 +4442,8 @@ export function App() {
         page.kind === "delete-sandbox" ||
         page.kind === "delete-snapshot" ||
         page.kind === "confirm-create-snapshot" ||
-        page.kind === "trust-hosts",
+        page.kind === "trust-hosts" ||
+        page.kind === "kill-session",
     });
   }, [
     booting,
@@ -4556,21 +4771,55 @@ export function App() {
         />
       );
       break;
+    case "sessions":
+      content = (
+        <SessionsScreen
+          sessions={sessions}
+          selected={sessionSelected}
+          loading={sessionsLoading}
+          error={sessionsError}
+        />
+      );
+      break;
+    case "session-log":
+      content = (
+        <SessionLogScreen
+          sessionName={page.sessionName}
+          lines={sessionLogLines}
+          loading={sessionLogLoading}
+          error={sessionLogError}
+          scrollRef={sessionLogScrollRef}
+        />
+      );
+      break;
+    case "kill-session":
+      content = (
+        <KillSessionScreen
+          sessionName={page.sessionName}
+          error={killSessionError}
+          actions={actions}
+          selectedIndex={selectedActionIndex}
+        />
+      );
+      break;
     case "ssh-terminal":
-      content = sshArgv ? (
-        <SshTerminalScreen
-          argv={sshArgv}
+      content = api ? (
+        <SessionTerminalScreen
+          api={api}
+          sandboxId={page.id}
+          {...(page.sessionId === undefined ? {} : { sessionId: page.sessionId })}
+          {...(page.newSession === undefined ? {} : { newSession: page.newSession })}
           label={page.label}
           statusMessage={terminalStatus}
-          onExit={handleSshExit}
+          onExit={handleTerminalExit}
           onSessionChange={handleSessionChange}
         />
       ) : (
         <LoadingPanel
           loading={false}
-          error="The SSH command could not be built from the configured API URL."
-          title="SSH terminal"
-          fallback="The SSH terminal is unavailable."
+          error="The AerolVM server is not connected."
+          title="Terminal"
+          fallback="The terminal is unavailable."
         />
       );
       break;
