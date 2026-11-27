@@ -14,11 +14,17 @@ import {
   truncate,
 } from "../format";
 import { LIST_COLUMN_WIDTHS, visibleListColumns } from "../list-columns";
+import { sortLabel, type SortMode } from "../list-view";
 import { colors } from "../theme";
 
 interface ListScreenProps {
   sandboxes: SandboxInfo[];
+  /** Unfiltered count, shown as "3 of 10" while a filter is active. */
+  totalCount: number;
   selected: number;
+  filter: string;
+  filterEditing: boolean;
+  sort: SortMode;
   loading: boolean;
   error: string | null;
 }
@@ -27,21 +33,35 @@ const WIDTHS = LIST_COLUMN_WIDTHS;
 /** Root padding, card borders and card padding around the table. */
 const CARD_CHROME = 6;
 
-export function ListScreen({ sandboxes, selected, loading, error }: ListScreenProps) {
+export function ListScreen({
+  sandboxes,
+  totalCount,
+  selected,
+  filter,
+  filterEditing,
+  sort,
+  loading,
+  error,
+}: ListScreenProps) {
   const { width, height } = useTerminalDimensions();
   const innerWidth = Math.max(0, width - CARD_CHROME);
   const columns = visibleListColumns(innerWidth);
   const show = (column: (typeof columns)[number]) => columns.includes(column);
+  const filterVisible = filterEditing || filter.length > 0;
   // Leave room for the tab bar, card borders, the table header, the separator,
   // the New sandbox button, the footer, the usage bar and the page chrome so
-  // the button is never pushed out.
-  const visibleRows = Math.max(1, height - 19);
+  // the button is never pushed out. The filter row takes two more lines.
+  const visibleRows = Math.max(1, height - 19 - (filterVisible ? 2 : 0));
   const start = Math.max(
     0,
     Math.min(selected - Math.floor(visibleRows / 2), sandboxes.length - visibleRows),
   );
   const visible = sandboxes.slice(start, start + visibleRows);
   const newSelected = selected >= sandboxes.length;
+  const query = filter.trim();
+  const title = query
+    ? `Sandboxes (${sandboxes.length} of ${totalCount}) · ${sortLabel(sort)}`
+    : `Sandboxes (${totalCount}) · ${sortLabel(sort)}`;
 
   return (
     <box flexDirection="column" flexGrow={1}>
@@ -55,7 +75,7 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
         borderStyle="rounded"
         borderColor={colors.border}
         backgroundColor={colors.panel}
-        title={`Sandboxes (${sandboxes.length})`}
+        title={title}
         titleColor={colors.accent}
         paddingLeft={1}
         paddingRight={1}
@@ -66,6 +86,22 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
           <text fg={colors.error} wrapMode="word">
             {error}
           </text>
+        ) : null}
+
+        {filterEditing || filter.length > 0 ? (
+          <box
+            flexDirection="row"
+            flexShrink={0}
+            paddingLeft={1}
+            paddingRight={1}
+            paddingBottom={1}
+          >
+            <text fg={colors.muted}>Filter: </text>
+            <text fg={filter.length > 0 ? colors.text : colors.muted}>
+              {filter.length > 0 ? filter : "type to filter"}
+            </text>
+            {filterEditing ? <text fg={colors.accent}>▌</text> : null}
+          </box>
         ) : null}
 
         <box flexDirection="column" flexShrink={0}>
@@ -111,16 +147,26 @@ export function ListScreen({ sandboxes, selected, loading, error }: ListScreenPr
             <box flexGrow={1} />
           </box>
 
-          {loading && sandboxes.length === 0 ? (
+          {loading && totalCount === 0 ? (
             <text fg={colors.muted} paddingLeft={1} paddingTop={1}>
               Loading sandboxes…
             </text>
           ) : null}
 
-          {!loading && sandboxes.length === 0 ? (
-            <text fg={colors.muted} paddingLeft={1} paddingTop={1}>
-              No sandboxes yet.
-            </text>
+          {!loading && !query && totalCount === 0 ? (
+            <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingTop={1}>
+              <text fg={colors.text}>No sandboxes yet.</text>
+              <text fg={colors.muted} wrapMode="word">
+                Press n to create one, or 2 for Snapshots to boot from a snapshot.
+              </text>
+            </box>
+          ) : null}
+
+          {!loading && query && sandboxes.length === 0 ? (
+            <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingTop={1}>
+              <text fg={colors.text}>No sandboxes match "{query}"</text>
+              <text fg={colors.muted}>Esc clears the filter</text>
+            </box>
           ) : null}
 
           {visible.map((sandbox, index) => {

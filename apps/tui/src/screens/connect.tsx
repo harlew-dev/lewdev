@@ -30,6 +30,10 @@ export function ConnectScreen({ form, activeField, busy, error, configPath }: Co
     <scrollbox ref={scrollRef} flexGrow={1} flexShrink={1} width="100%" scrollY>
       <Panel title="Connect to AerolVM" width={74}>
         <text fg={colors.text}>Point lewdev at your AerolVM server and paste an API token.</text>
+        <text fg={colors.muted} wrapMode="word">
+          Need an API token? See the AerolVM docs at https://microvm.aerol.ai/ for how to create
+          one.
+        </text>
         <box flexDirection="column" gap={1}>
           <box id="connect-url">
             <Field

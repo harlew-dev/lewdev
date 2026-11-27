@@ -124,6 +124,17 @@ import {
 } from "./components";
 import { safeHost, sandboxLabel } from "./format";
 import {
+  filterSandboxes,
+  filterSnapshots,
+  nextSortMode,
+  SANDBOX_SORT_MODES,
+  SNAPSHOT_SORT_MODES,
+  sortSandboxes,
+  sortSnapshots,
+  type SortMode,
+  type SnapshotSortMode,
+} from "./list-view";
+import {
   backFromTerminal,
   breadcrumbTrail,
   currentPage,
@@ -190,6 +201,7 @@ import { LifecycleScreen } from "./screens/lifecycle";
 import { ResizeScreen } from "./screens/resize";
 import { EnablePublicSshScreen } from "./screens/enable-public-ssh";
 import { ForgetHostScreen } from "./screens/forget-host";
+import { HelpScreen } from "./screens/help";
 import { ListScreen } from "./screens/list";
 import { NewSnapshotScreen } from "./screens/new-snapshot";
 import { OpenPortScreen, type PortFormValues } from "./screens/open-port";
@@ -223,6 +235,13 @@ import { colors } from "./theme";
 import { VERSION } from "./version";
 
 const SPINNER_FRAMES = ["|", "/", "-", "\\"] as const;
+
+/** Selection value for the "+ New …" row at the end of a list. */
+const NEW_ROW = "\u0000new";
+
+function isHelpKey(key: KeyEvent): boolean {
+  return !key.ctrl && !key.meta && (key.sequence === "?" || key.name === "?");
+}
 
 const CONNECT_FIELDS: [ConnectField, ...ConnectField[]] = ["url", "token", "submit"];
 const CREATE_SNAPSHOT_FIELDS: [CreateSnapshotFocus, ...CreateSnapshotFocus[]] = ["name", "submit"];
@@ -370,14 +389,22 @@ export function App() {
   const [connectError, setConnectError] = useState<string | null>(null);
 
   const [sandboxes, setSandboxes] = useState<SandboxInfo[]>([]);
-  const [selected, setSelected] = useState(0);
+  /** Sandbox ID, NEW_ROW, or null before the first move. */
+  const [sandboxSelection, setSandboxSelection] = useState<string | null>(null);
+  const [sandboxFilter, setSandboxFilter] = useState("");
+  const [sandboxSort, setSandboxSort] = useState<SortMode>("newest");
+  const [filterEditing, setFilterEditing] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const hasSandboxes = useRef(false);
   const clipboardBusy = useRef(false);
 
   const [snapshots, setSnapshots] = useState<SnapshotInfo[]>([]);
-  const [snapshotSelected, setSnapshotSelected] = useState(0);
+  /** Snapshot name, NEW_ROW, or null before the first move. */
+  const [snapshotSelection, setSnapshotSelection] = useState<string | null>(null);
+  const [snapshotFilter, setSnapshotFilter] = useState("");
+  const [snapshotSort, setSnapshotSort] = useState<SnapshotSortMode>("newest");
   const [snapshotsLoading, setSnapshotsLoading] = useState(false);
   const [snapshotsError, setSnapshotsError] = useState<string | null>(null);
   const hasSnapshots = useRef(false);
@@ -423,6 +450,8 @@ export function App() {
   const [visibilityMenuOpen, setVisibilityMenuOpen] = useState(false);
   const [visibilityMenuIndex, setVisibilityMenuIndex] = useState(0);
   const [selectedActionId, setSelectedActionId] = useState<ActionId | null>(null);
+  /** The sandbox action the user left from, restored when a sub-page pops back. */
+  const sandboxActionRef = useRef<ActionId | null>(null);
   const [terminalStatus, setTerminalStatus] = useState<string | null>(null);
   const [hostKeyScan, setHostKeyScan] = useState<GatewayHostKeyScan | null>(null);
 
@@ -465,8 +494,31 @@ export function App() {
     page.kind === "ports" ||
     page.kind === "open-port";
   const pageDetails = details && details.id === sandboxId ? details : null;
-  const selectedSandbox = sandboxes[selected];
-  const selectedSnapshot = snapshots[snapshotSelected];
+  const visibleSandboxes = useMemo(
+    () => sortSandboxes(filterSandboxes(sandboxes, sandboxFilter), sandboxSort),
+    [sandboxes, sandboxFilter, sandboxSort],
+  );
+  const visibleSnapshots = useMemo(
+    () => sortSnapshots(filterSnapshots(snapshots, snapshotFilter), snapshotSort),
+    [snapshots, snapshotFilter, snapshotSort],
+  );
+  const sandboxNewSelected = sandboxSelection === NEW_ROW || visibleSandboxes.length === 0;
+  const selected = sandboxNewSelected
+    ? visibleSandboxes.length
+    : Math.max(
+        0,
+        visibleSandboxes.findIndex((sandbox) => sandbox.id === sandboxSelection),
+      );
+  const selectedSandbox = sandboxNewSelected ? undefined : visibleSandboxes[selected];
+  const snapshotNewSelected = snapshotSelection === NEW_ROW || visibleSnapshots.length === 0;
+  const snapshotSelected = snapshotNewSelected
+    ? visibleSnapshots.length
+    : Math.max(
+        0,
+        visibleSnapshots.findIndex((snapshot) => snapshot.name === snapshotSelection),
+      );
+  const selectedSnapshot = snapshotNewSelected ? undefined : visibleSnapshots[snapshotSelected];
+  const listFilter = page.kind === "snapshots" ? snapshotFilter : sandboxFilter;
   const snapshotPageName = page.kind === "snapshot" ? page.name : null;
   const snapshotMenuOptions = useMemo(
     () => buildSnapshotMenuOptions(snapshots, snapshotsLoaded),
@@ -656,15 +708,23 @@ export function App() {
     process.exit(0);
   }, [renderer]);
 
-  const push = useCallback((next: Page) => {
-    setSelectedActionId(null);
-    setTerminalStatus(null);
-    setStack((previous) => pushPage(previous, next));
-  }, []);
+  const push = useCallback(
+    (next: Page) => {
+      if (currentPage(stackRef.current).kind === "sandbox") {
+        sandboxActionRef.current = selectedActionId;
+      }
+      setSelectedActionId(null);
+      setTerminalStatus(null);
+      setStack((previous) => pushPage(previous, next));
+    },
+    [selectedActionId],
+  );
 
   const pop = useCallback(() => {
-    setSelectedActionId(null);
-    setStack((previous) => popPage(previous));
+    const previous = stackRef.current;
+    const destination = previous.length > 1 ? previous[previous.length - 2] : undefined;
+    setSelectedActionId(destination?.kind === "sandbox" ? sandboxActionRef.current : null);
+    setStack((current) => popPage(current));
   }, []);
 
   useEffect(() => {
@@ -775,16 +835,6 @@ export function App() {
     }
     void refreshSnapshots(false);
   }, [api, page.kind, refreshSnapshots]);
-
-  useEffect(() => {
-    setSelected((previous) => (sandboxes.length === 0 ? 0 : Math.min(previous, sandboxes.length)));
-  }, [sandboxes.length]);
-
-  useEffect(() => {
-    setSnapshotSelected((previous) =>
-      snapshots.length === 0 ? 0 : Math.min(previous, snapshots.length),
-    );
-  }, [snapshots.length]);
 
   useEffect(() => {
     if (snapshotPageName === null) {
@@ -1163,6 +1213,9 @@ export function App() {
    * underneath so breadcrumbs name the sandbox and esc lands on it.
    */
   function pushSandboxScoped(next: Page): void {
+    if (currentPage(stackRef.current).kind === "sandbox") {
+      sandboxActionRef.current = selectedActionId;
+    }
     setSelectedActionId(null);
     setTerminalStatus(null);
     setStack((previous) => pushScopedPage(previous, next));
@@ -1181,7 +1234,7 @@ export function App() {
           }
           return;
         }
-        if (selected >= sandboxes.length) {
+        if (!selectedSandbox) {
           openCreate();
           return;
         }
@@ -1504,6 +1557,7 @@ export function App() {
     if (!target) {
       return;
     }
+    setSelectedActionId(sandboxActionRef.current);
     setStack((previous) => backFromTerminal(previous, target));
     void refreshList(false);
     void loadDetails(target.id);
@@ -1528,6 +1582,7 @@ export function App() {
       }
       const target: SandboxPageTarget = { id: top.id, label: top.label };
       setTerminalStatus(null);
+      setSelectedActionId(sandboxActionRef.current);
       setStack((previous) => backFromTerminal(previous, target));
       void refreshList(false);
       void loadDetails(target.id);
@@ -2125,7 +2180,7 @@ export function App() {
       setConfig(saved);
       setApi(LewdevApi.fromConfig(saved));
       setSandboxes([]);
-      setSelected(0);
+      setSandboxSelection(null);
       setListError(null);
       setConnectForm({ url: "", token: "" });
       setSelectedActionId(null);
@@ -2212,9 +2267,8 @@ export function App() {
       }
 
       const items = await refreshList(false);
-      const index = items.findIndex((sandbox) => sandbox.id === created.sandbox.id);
-      if (index >= 0) {
-        setSelected(index);
+      if (items.some((sandbox) => sandbox.id === created.sandbox.id)) {
+        setSandboxSelection(created.sandbox.id);
       }
       setCreateValues(CREATE_DEFAULT);
       setCreateFocus("image");
@@ -2263,8 +2317,7 @@ export function App() {
       await api.resize(target.id, input);
       await loadDetails(target.id);
       await refreshList(false);
-      setSelectedActionId(null);
-      setStack((previous) => popPage(previous));
+      pop();
       showToast("success", `Resized ${target.label}.`);
     } catch (error) {
       setResizeError(describeError(error));
@@ -2293,8 +2346,7 @@ export function App() {
       await api.updateLifecycle(target.id, lifecycleUpdateInput(lifecycleValues));
       await loadDetails(target.id);
       await refreshList(false);
-      setSelectedActionId(null);
-      setStack((previous) => popPage(previous));
+      pop();
       showToast("success", `Updated the lifecycle for ${target.label}.`);
     } catch (error) {
       setLifecycleError(describeError(error));
@@ -2343,7 +2395,6 @@ export function App() {
       });
       setCreateSnapshotName("");
       setCreateSnapshotFocus("name");
-      setSelectedActionId(null);
       setStack((previous) => {
         let next = previous;
         while (next.length > 1) {
@@ -2355,6 +2406,7 @@ export function App() {
         }
         return next;
       });
+      setSelectedActionId(sandboxActionRef.current);
       showToast("success", `Snapshot ${created.name} created`);
       void refreshSnapshots(false);
     } catch (error) {
@@ -2413,9 +2465,8 @@ export function App() {
     try {
       const created = await api.registerSnapshot(input);
       const items = await refreshSnapshots(false);
-      const index = items.findIndex((snapshot) => snapshot.name === created.name);
-      if (index >= 0) {
-        setSnapshotSelected(index);
+      if (items.some((snapshot) => snapshot.name === created.name)) {
+        setSnapshotSelection(created.name);
       }
       setNewSnapshotValues(NEW_SNAPSHOT_DEFAULT);
       setNewSnapshotFocus("name");
@@ -2519,8 +2570,7 @@ export function App() {
     try {
       await saveGatewayHostKeys(host, scan.keys);
       setHostKeyScan(null);
-      setSelectedActionId(null);
-      setStack((previous) => popPage(previous));
+      pop();
       showToast("success", `Saved ${label} for ${scan.entry}.`);
     } catch (error) {
       showToast("error", describeError(error));
@@ -2554,8 +2604,7 @@ export function App() {
       setBusyMessage(null);
     }
 
-    setSelectedActionId(null);
-    setStack((previous) => popPage(previous));
+    pop();
     if (failure) {
       showToast("error", failure);
     } else if (removed) {
@@ -2626,6 +2675,72 @@ export function App() {
     }
   }
 
+  /** Moves the sandbox-list cursor within the filtered rows, ending on "+ New …". */
+  function moveSandboxSelection(delta: number): void {
+    const next = Math.min(Math.max(selected + delta, 0), visibleSandboxes.length);
+    setSandboxSelection(
+      next >= visibleSandboxes.length ? NEW_ROW : (visibleSandboxes[next]?.id ?? NEW_ROW),
+    );
+  }
+
+  /** Moves the snapshot-list cursor within the filtered rows, ending on "+ New …". */
+  function moveSnapshotSelection(delta: number): void {
+    const next = Math.min(Math.max(snapshotSelected + delta, 0), visibleSnapshots.length);
+    setSnapshotSelection(
+      next >= visibleSnapshots.length ? NEW_ROW : (visibleSnapshots[next]?.name ?? NEW_ROW),
+    );
+  }
+
+  function setCurrentFilter(value: string): void {
+    if (page.kind === "snapshots") {
+      setSnapshotFilter(value);
+    } else {
+      setSandboxFilter(value);
+    }
+  }
+
+  /** Single-letter shortcuts stay out of the way while a text field has focus. */
+  function textInputFocused(): boolean {
+    switch (page.kind) {
+      case "sandboxes":
+      case "snapshots":
+        return filterEditing;
+      case "connect":
+        return connectField !== "submit";
+      case "new-sandbox":
+        return (
+          createFocus === "name" ||
+          createFocus === "image-ref" ||
+          createFocus === "image-dockerfile" ||
+          createFocus === "size-cpu" ||
+          createFocus === "size-memory" ||
+          createFocus === "size-disk"
+        );
+      case "new-snapshot":
+        return (
+          newSnapshotFocus === "name" ||
+          newSnapshotFocus === "image-ref" ||
+          newSnapshotFocus === "dockerfile" ||
+          newSnapshotFocus === "cpu" ||
+          newSnapshotFocus === "memory" ||
+          newSnapshotFocus === "disk"
+        );
+      case "create-snapshot":
+        return createSnapshotFocus === "name";
+      case "add-ssh-key":
+      case "vscode-directory":
+        return true;
+      case "resize":
+        return (
+          resizeFocus === "size-cpu" || resizeFocus === "size-memory" || resizeFocus === "size-disk"
+        );
+      case "open-port":
+        return portForm !== null && portForm.field !== "submit";
+      default:
+        return false;
+    }
+  }
+
   function insertPastedText(raw: string): void {
     if (
       page.kind === "new-sandbox" &&
@@ -2662,6 +2777,11 @@ export function App() {
 
     const text = raw.replace(/[\r\n\t]+/g, " ").trim();
     if (!text) {
+      return;
+    }
+
+    if (filterEditing && (page.kind === "sandboxes" || page.kind === "snapshots")) {
+      setCurrentFilter(appendText(listFilter, text));
       return;
     }
 
@@ -2850,7 +2970,19 @@ export function App() {
       quit();
       return;
     }
+    if (helpOpen) {
+      if (key.name === "escape" || isHelpKey(key)) {
+        key.preventDefault();
+        setHelpOpen(false);
+      }
+      return;
+    }
     if (booting || busyMessage || connectBusy || setupRunning) {
+      return;
+    }
+    if (!textInputFocused() && isHelpKey(key)) {
+      key.preventDefault();
+      setHelpOpen(true);
       return;
     }
 
@@ -2936,6 +3068,35 @@ export function App() {
 
     if (page.kind === "sandboxes" || page.kind === "snapshots") {
       const pressed = actionKey(key);
+      if (filterEditing) {
+        if (key.name === "escape") {
+          key.preventDefault();
+          setCurrentFilter("");
+          setFilterEditing(false);
+          return;
+        }
+        if (key.name === "return" || key.name === "enter") {
+          key.preventDefault();
+          setFilterEditing(false);
+          return;
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          setCurrentFilter(removeLastChar(listFilter));
+          return;
+        }
+        if (key.name === "tab" || key.name === "backtab") {
+          key.preventDefault();
+          setFilterEditing(false);
+          setSelectedActionId(null);
+          setStack([page.kind === "sandboxes" ? SNAPSHOTS_PAGE : ROOT_PAGE]);
+          return;
+        }
+        const char = printableChar(key);
+        if (char) {
+          setCurrentFilter(appendText(listFilter, char));
+        }
+        return;
+      }
       if (key.name === "tab" || key.name === "backtab") {
         setSelectedActionId(null);
         setStack([page.kind === "sandboxes" ? SNAPSHOTS_PAGE : ROOT_PAGE]);
@@ -2949,19 +3110,38 @@ export function App() {
         setStack([SNAPSHOTS_PAGE]);
         return;
       }
+      if (pressed === "/") {
+        key.preventDefault();
+        setFilterEditing(true);
+        return;
+      }
+      if (pressed === "s") {
+        key.preventDefault();
+        if (page.kind === "sandboxes") {
+          setSandboxSort((current) => nextSortMode(current, SANDBOX_SORT_MODES));
+        } else {
+          setSnapshotSort((current) => nextSortMode(current, SNAPSHOT_SORT_MODES));
+        }
+        return;
+      }
+      if (key.name === "escape" && listFilter.length > 0) {
+        key.preventDefault();
+        setCurrentFilter("");
+        return;
+      }
       if (key.name === "down" || pressed === "j") {
         if (page.kind === "sandboxes") {
-          setSelected((previous) => Math.min(previous + 1, sandboxes.length));
+          moveSandboxSelection(1);
         } else {
-          setSnapshotSelected((previous) => Math.min(previous + 1, snapshots.length));
+          moveSnapshotSelection(1);
         }
         return;
       }
       if (key.name === "up" || pressed === "k") {
         if (page.kind === "sandboxes") {
-          setSelected((previous) => Math.max(0, previous - 1));
+          moveSandboxSelection(-1);
         } else {
-          setSnapshotSelected((previous) => Math.max(0, previous - 1));
+          moveSnapshotSelection(-1);
         }
         return;
       }
@@ -3120,7 +3300,7 @@ export function App() {
           return;
         }
       }
-      if (resizeFocus !== "submit") {
+      if (resizeFocus !== "submit" && key.name !== "escape") {
         const char = printableChar(key);
         if (!char) {
           return;
@@ -3770,6 +3950,8 @@ export function App() {
       return actionHints(actions, {
         extra: [
           ["↑/↓", "move"],
+          ["/", "filter"],
+          ["s", "sort"],
           ["tab", "switch tab"],
           ["1/2", "tabs"],
         ],
@@ -4019,6 +4201,48 @@ export function App() {
     lifecycleFocus,
     resizeFocus,
   ]);
+
+  const helpGlobalHints = useMemo<ActionHint[]>(() => {
+    if (page.kind === "sandboxes" || page.kind === "snapshots") {
+      return [
+        ["tab", "switch tab"],
+        ["1/2", "switch tab"],
+        ["/", "filter"],
+        ["s", "sort"],
+        ["?", "help"],
+        ["q", "quit"],
+        ["esc", "clear filter / close help"],
+      ];
+    }
+    return [
+      ["?", "help"],
+      ["esc", "back / close help"],
+    ];
+  }, [page.kind]);
+
+  const textFocus = textInputFocused();
+  const footerHints = useMemo<ActionHint[]>(() => {
+    if (booting || page.kind === "ssh-terminal") {
+      return hints;
+    }
+    if (helpOpen) {
+      return [
+        ["esc", "close help"],
+        ["?", "close help"],
+      ];
+    }
+    if (filterEditing) {
+      return [
+        ["enter", "done"],
+        ["esc", "clear filter"],
+        ["tab", "switch tab"],
+      ];
+    }
+    if (textFocus) {
+      return hints;
+    }
+    return [...hints, ["?", "help"]];
+  }, [booting, hints, page.kind, helpOpen, filterEditing, textFocus]);
 
   if (booting) {
     return (
@@ -4356,9 +4580,13 @@ export function App() {
         <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
           <HomeTabs active="snapshots" />
           <SnapshotsScreen
-            snapshots={snapshots}
+            snapshots={visibleSnapshots}
             sandboxes={sandboxes}
+            totalCount={snapshots.length}
             selected={snapshotSelected}
+            filter={snapshotFilter}
+            filterEditing={filterEditing}
+            sort={snapshotSort}
             loading={snapshotsLoading}
             error={snapshotsError}
           />
@@ -4370,13 +4598,28 @@ export function App() {
         <box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0}>
           <HomeTabs active="sandboxes" />
           <ListScreen
-            sandboxes={sandboxes}
+            sandboxes={visibleSandboxes}
+            totalCount={sandboxes.length}
             selected={selected}
+            filter={sandboxFilter}
+            filterEditing={filterEditing}
+            sort={sandboxSort}
             loading={listLoading}
             error={listError}
           />
         </box>
       );
+  }
+
+  if (helpOpen) {
+    const trail = breadcrumbTrail(stack);
+    content = (
+      <HelpScreen
+        title={trail[trail.length - 1] ?? "lewdev"}
+        hints={hints}
+        globalHints={helpGlobalHints.filter(([key]) => !hints.some(([pageKey]) => pageKey === key))}
+      />
+    );
   }
 
   return (
@@ -4396,7 +4639,7 @@ export function App() {
       <ToastLine toast={toast} />
       {content}
       <BusyLine message={busyMessage} frame={SPINNER_FRAMES[spinnerFrame] ?? SPINNER_FRAMES[0]} />
-      <KeyHints hints={hints} />
+      <KeyHints hints={footerHints} />
       {page.kind === "sandboxes" || page.kind === "snapshots" ? (
         <UsageBar summary={usage} updateVersion={updateNotice?.latestVersion} />
       ) : null}
